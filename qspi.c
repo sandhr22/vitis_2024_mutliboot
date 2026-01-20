@@ -866,5 +866,299 @@ u32 SendBankSelect(u8 BankSel)
 
 	return XST_SUCCESS;
 }
+
+
+// helper functions for supporting QSPI I/O
+
+///*****************************************************************************/
+/**
+*
+* This function switches and keeps QSPI flash in I/O mode
+* Call directltly after InitQspi() from within ImageMover.c, this way FIFOs/Queues are empty
+*
+* @param	 
+*
+* @return	XST_SUCCESS or XST_FAILURE
+*
+* @note		None
+*
+****************************************************************************/
+
+u32 QspiSetIOMode(void)
+{
+	//QspiInstancePtr
+	u32 ConfigReg;
+	u32 ConfigBase = QspiInstancePtr->Config.BaseAddress;
+
+	// Print contents of LQSPI CR register before change
+	fsbl_printf(DEBUG_INFO, "LQSPI Config Register before I/O mode change: 0x%08X\r\n",
+		XQspiPs_GetLqspiConfigReg(QspiInstancePtr));
+
+	// Disable the controller
+	XQspiPs_Disable(QspiInstancePtr);
+
+	// keep master + SSFORCE (allows for manual CS control), and keep in Flash memory interface mode
+	ConfigReg = XQspiPs_ReadReg(ConfigBase, XQSPIPS_CR_OFFSET);
+
+	// Disabled Manual Start Control, so that as soon as data in TX FIFO, transfer starts
+	// ConfigReg |= XQSPIPS_CR_MSTREN_MASK; // Default is Auto-start mode
+	ConfigReg |= XQSPIPS_CR_SSFORCE_MASK;
+
+	XQspiPs_WriteReg(ConfigBase, XQSPIPS_CR_OFFSET, ConfigReg);
+
+	// Disable Linear mode
+	XQspiPs_SetLqspiConfigReg(QspiInstancePtr, 0x0);
+
+	// Enable the controller
+	XQspiPs_Enable(QspiInstancePtr);
+
+	// Print contents of LQSPI CR register after change
+	fsbl_printf(DEBUG_INFO, "LQSPI Config Register after I/O mode change: 0x%08X\r\n",
+		XQspiPs_GetLqspiConfigReg(QspiInstancePtr));
+
+	return XST_SUCCESS;
+}
+
+///*****************************************************************************/
+/**
+*
+* This function should set write enable latch bit (required before page program or sector erases) 
+*
+* @param	None
+*
+* @return	XST_SUCCESS or XST_FAILURE
+*
+* @note		None
+*
+****************************************************************************/
+u32 SendWriteEnable(void)
+{
+	WriteBuffer[0] = XQSPIPS_FLASH_OPCODE_WREN;
+
+	//set write enable and return success status of command
+	u32 Status = XQspiPs_PolledTransfer(QspiInstancePtr, WriteBuffer, NULL, 1);
+	if (Status != XST_SUCCESS) 
+	{
+		return XST_FAILURE;
+	}
+
+	// check if Write Enable Latch is set (Bit 1 of Status Register must be 1)
+	Status = PollStatusReg(0x02, 0x02);  // Wait until Write Enable Latch bit is set
+	if (Status != XST_SUCCESS) 
+	{
+		fsbl_printf(DEBUG_GENERAL, "Write Enable Latch not set\r\n");
+		return XST_FAILURE;
+	}
+	
+	return XST_SUCCESS;
+}
+
+///*****************************************************************************/
+/**
+*
+* This function waits after flash write/erase until the device is ready
+*
+* @param	None
+*
+* @return	XST_SUCCESS or XST_FAILURE
+*
+* @note		None
+*
+****************************************************************************/
+u32 WaitForFlashReady(void)
+{
+    // Check Status Register's WIP bit (bit 0) until it is 0
+	u32 Status;
+	Status = PollStatusReg(0x00, 0x01);  // Wait until WIP bit is 0
+	if (Status != XST_SUCCESS) 
+	{
+		fsbl_printf(DEBUG_GENERAL, "Flash still not ready\r\n");
+		return XST_FAILURE;
+	}
+    
+    return XST_SUCCESS;
+}
+
+u32 PollStatusReg(u8 ExpectedValue, u8 Mask)
+{
+	u32 Status;
+	u32 Timeout = 10000;  // Timeout counter
+	u8 StatusReg;
+	
+	do 
+	{
+		// Read Status Register
+		WriteBuffer[0] = 0x05;  // Read Status Register command
+		WriteBuffer[1] = 0x00;  // Dummy byte for response
+		
+		Status = XQspiPs_PolledTransfer(QspiInstancePtr, WriteBuffer, ReadBuffer, 2);
+		if (Status != XST_SUCCESS) 
+		{
+			return XST_FAILURE;
+		}
+		
+		StatusReg = ReadBuffer[1];  // Status register is in second byte
+		
+		// Check masked bits
+		if ((StatusReg & Mask) == ExpectedValue) 
+		{
+			break;  // Condition met
+		}
+		
+		Timeout--;
+	} while (Timeout > 0);
+	
+	if (Timeout == 0) 
+	{
+		fsbl_printf(DEBUG_GENERAL, "Flash status register polling timeout\r\n");
+		return XST_FAILURE;
+	}
+	
+	return XST_SUCCESS;
+}
+
+///*****************************************************************************/
+/**
+*
+* This function erases a subsector (4 KiB) - required before writing a page (256 bytes)
+* Erase sets bits to 1, programming can only change bits from 1 to 0
+* TODO: May potentially require unlocking subsector-level protection first - don't think this is enabled by default though?
+*
+* @param	SectorAddress: Address of the sector to erase - must belong to the 4 KiB sectors defined in the flash datasheet
+
+*
+* @return	XST_SUCCESS or XST_FAILURE
+*
+* @note		None
+*
+****************************************************************************/
+u32 EraseSector(u32 SectorAddress) 
+{
+	u8 iterator;
+    u32 Status;
+    u32 BankSel = 0;
+    
+    // For >16MB flash, check if we need bank switching - not required for Arty flash chip but likely for Zedboard and Payload
+    if (SectorAddress >= FLASH_SIZE_16MB) 
+	{
+        BankSel = SectorAddress / FLASH_SIZE_16MB;
+        Status = SendBankSelect(BankSel);
+        if (Status != XST_SUCCESS) {
+            return XST_FAILURE;
+        }
+        SectorAddress = SectorAddress % FLASH_SIZE_16MB;
+    }
+    
+    // Send Write Enable
+    Status = SendWriteEnable();
+    if (Status != XST_SUCCESS) 
+	{
+        fsbl_printf(DEBUG_GENERAL, "Error: Write Enable failed\r\n");
+        return XST_FAILURE;
+    }
+    
+    // Send Sector Erase command (4KiB sectors)
+    WriteBuffer[COMMAND_OFFSET]   = XQSPIPS_FLASH_OPCODE_BE_4K;  // Sector Erase (4KiB)
+    WriteBuffer[ADDRESS_1_OFFSET] = (u8)((SectorAddress >> 16) & 0xFF);
+    WriteBuffer[ADDRESS_2_OFFSET] = (u8)((SectorAddress >> 8) & 0xFF);
+    WriteBuffer[ADDRESS_3_OFFSET] = (u8)(SectorAddress & 0xFF);
+    
+    Status = XQspiPs_PolledTransfer(QspiInstancePtr, WriteBuffer, NULL, 4);
+    if (Status != XST_SUCCESS) 
+	{
+		fsbl_printf(DEBUG_GENERAL, "Error: Sector Erase failed\r\n");
+        return XST_FAILURE;
+    }
+    
+    // Wait for erase completion - MT25Q spepcific typ 50ms subsector erase time, max 400ms
+	fsbl_printf(DEBUG_INFO, "Erasing sector at address 0x%08X\r\n", SectorAddress);
+	for (iterator = 0; iterator < 10; iterator++)
+	{
+		usleep(50000);  // Wait 50ms before polling status
+		Status = WaitForFlashReady();
+		if (Status == XST_SUCCESS) 
+		{
+			break;  // Erase completed
+		}
+	}
+    
+    if (Status != XST_SUCCESS) 
+	{
+        return XST_FAILURE;
+    }
+    
+    // Reset bank selection if needed
+    if (BankSel > 0) 
+	{
+        Status = SendBankSelect(0);
+    }
+    
+    return Status;
+}
+
+
+///*****************************************************************************/
+/**
+*
+* This function writes content of WriteBufferPtr array to addressed page (address at start of WriteBufferPtr)
+*
+* @param	SectorAddress: Address of the sector to erase
+*
+* @return	XST_SUCCESS or XST_FAILURE
+*
+* @note		None
+*
+****************************************************************************/
+u32 WritePage(u8 *WriteBufferPtr, u32 BufferSize) 
+{
+	u8 iterator;
+    u32 Status;
+
+	if(BufferSize > 260)
+	{
+		fsbl_printf(DEBUG_GENERAL, "Error: WritePage buffer size too large\r\n");
+		return XST_FAILURE;
+	}
+
+    // Send Write Enable
+    Status = SendWriteEnable();
+    if (Status != XST_SUCCESS) 
+	{
+        fsbl_printf(DEBUG_GENERAL, "Error: Write Enable failed\r\n");
+        return XST_FAILURE;
+    }
+    
+    // First byte of WriteBufferPtr should be Page Program
+	WriteBufferPtr[0] = XQSPIPS_FLASH_OPCODE_PP;
+    
+	fsbl_printf(DEBUG_INFO, "Writing page now\r\n");
+    Status = XQspiPs_PolledTransfer(QspiInstancePtr, WriteBufferPtr, NULL, BufferSize);
+    if (Status != XST_SUCCESS) 
+	{
+		fsbl_printf(DEBUG_GENERAL, "Error: Page Program failed\r\n");
+        return XST_FAILURE;
+    }
+    
+    // Wait for page program completion - 
+	// MT25Q spepcific typ 18 + 2.5 * (NUM_BYTES/6 )ms subsector erase time, max 1800us
+	// struct size may change so use max wait time
+	for (iterator = 0; iterator < 3; iterator++)
+	{
+		usleep(1000);  // Wait 1ms before polling status
+		Status = WaitForFlashReady();
+		if (Status == XST_SUCCESS) 
+		{
+			break;  // Program completed
+		}
+	}
+
+    if (Status != XST_SUCCESS) 
+	{
+        return XST_FAILURE;
+    }
+    
+    return Status;
+}
+
 #endif
 

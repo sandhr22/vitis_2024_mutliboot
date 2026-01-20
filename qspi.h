@@ -103,6 +103,15 @@ u32 QspiAccess( u32 SourceAddress,
 
 u32 FlashReadID(void);
 u32 SendBankSelect(u8 BankSel);
+
+/******************** User-Defined Function Prototypes **********************/
+u32 QspiSetIOMode(void);
+u32 SendWriteEnable(void);
+u32 WaitForFlashReady(void);
+u32 PollStatusReg(u8 ExpectedValue, u8 Mask);
+u32 EraseSector(u32 SectorAddress);
+u32 WritePage(u8 *WriteBufferPtr, u32 BufferSize);
+
 /************************** Variable Definitions *****************************/
 
 
