@@ -71,6 +71,7 @@
 #include "pcap.h"
 #include "fsbl_hooks.h"
 #include "md5.h"
+#include "qspi.h"
 
 #ifdef XPAR_XWDTPS_0_BASEADDR
 #include "xwdtps.h"
@@ -91,9 +92,25 @@
 #define BITSTREAM_ADDRESS1 0x004C0000 // Address in QSPI where bitstream image 1 is stored - 38 Mib
 #define BITSTREAM_ADDRESS2 0x008C0000 // Address in QSPI where bitstream image 2 is stored - 70 Mib
 
-#define APPLICATION_ADDRESS1 0x000C0000 // Address in QSPI where application image 1 is stored - 6 Mib
-#define APPLICATION_ADDRESS2 0x001C0000 // Address in QSPI where application image 2 is stored - 14 Mib
-#define APPLICATION_ADDRESS3 0x002C0000 // Address in QSPI where application image 3 is stored - 22 Mib
+#define APPLICATION_ADDRESS1 0x000C0000 // Address in QSPI where application image A is stored - 6 Mib
+#define APPLICATION_ADDRESS2 0x001C0000 // Address in QSPI where application image B is stored - 14 Mib
+#define APPLICATION_ADDRESS3 0x002C0000 // Address in QSPI where application image Golden is stored - 22 Mib
+
+#define APP_IMAGE_NUMBER 3 // Number of application images available
+#define BITSTREAM_IMAGE_NUMBER 2 // Number of bitstream images available
+
+#define SLOT_MAGIC_NUMBER 0xA1B2C3D4 // Magic number to for XIP metadata struct
+
+// TODO: Adjust addresses to be at bottom of memory at address 0x0 of flash chip (separate by flash subsector size)
+#define SLOT_METADATA_ADDRESS1 0x00FFD000 //Third last 4K sector of 16MB QSPI flash - 127.90625 Mib
+#define SLOT_METADATA_ADDRESS2 0x00FFF000 //Last 4K sector of 16MB QSPI flash - 127.96875 Mib
+
+#define PAGE_PROGRAM_CMD 0x02 // Page Program command for QSPI flash (equivalent to XQSPIPS_FLASH_OPCODE_PP)
+#define COMMAND_OFFSET 0 // command byte in write buffer of XQspiPs_PolledTransfer
+#define ADDRESS_1_OFFSET 1 // MSB of address in 16 MB sized QSPI flash chip in XQspiPs_PolledTransfer
+#define ADDRESS_2_OFFSET 2 // Middle byte of address
+#define ADDRESS_3_OFFSET 3 // LSB of address 
+#define WRITE_BUFFER_DATA_OFFSET 4	// start byte for data in write buffer of XQspiPs_PolledTransfer()
 
 /**************************** Type Definitions *******************************/
 
@@ -123,7 +140,7 @@ ImageMoverType MoveImage;
 /*
  * Header array
  */
-PartHeader PartitionHeader[MAX_PARTITION_NUMBER];
+PartHeader PartitionHeader[MAX_PARTITION_NUMBER]; // will be redundant in this FSBL implementation (every boot image has 1 partition only)
 u32 PartitionCount;
 u32 FsblLength;
 
@@ -135,6 +152,12 @@ extern u32 Silicon_Version;
 extern u32 FlashReadBaseAddress;
 extern u8 LinearBootDeviceFlag;
 extern XDcfg *DcfgInstPtr;
+
+
+// add all logic for METADATA here
+
+
+
 
 ///*****************************************************************************/
 /**
@@ -150,11 +173,11 @@ extern XDcfg *DcfgInstPtr;
 ****************************************************************************/
 u32 LoadBootImage(void)
 {
-	u32 ImageStartAddress = 0;
-    u32 MultiBootReg = 0;
 	u32 PartitionNum;
 	u32 Status;
 
+	u32 FsblImageStartAddress = 0; 
+    u32 MultiBootReg = 0;
 
 	//Array of Boot Image Start Addresses
 	u32 BitstreamStartAddress[] = {BITSTREAM_ADDRESS1, BITSTREAM_ADDRESS2};
@@ -171,11 +194,18 @@ u32 LoadBootImage(void)
 
     //Compute the image start address
     //0x8000 bytes = 256 Kb = 32 KB
-    ImageStartAddress = (MultiBootReg & PCAP_MBOOT_REG_REBOOT_OFFSET_MASK) * GOLDEN_IMAGE_OFFSET;
-	fsbl_printf(DEBUG_INFO,"FSBL Boot Image Start Address: 0x%08x\r\n",ImageStartAddress);
+    FsblImageStartAddress = (MultiBootReg & PCAP_MBOOT_REG_REBOOT_OFFSET_MASK) * GOLDEN_IMAGE_OFFSET;
+	fsbl_printf(DEBUG_INFO,"FSBL Boot Image Start Address: 0x%08x\r\n",FsblImageStartAddress);
+
+	// Ensure QSPI Controller is in I/O mode
+	Status = QspiSetIOMode();
+	if (Status != XST_SUCCESS)
+	{
+		fsbl_printf(DEBUG_GENERAL, "QspiSetIOMode Failed\r\n");
+	}
 
 	// Load Bitstream Image First - only 2 images for now
-	for (PartitionNum = 0; PartitionNum < 2; PartitionNum++)
+	for (PartitionNum = 0; PartitionNum < BITSTREAM_IMAGE_NUMBER; PartitionNum++)
 	{
 		fsbl_printf(DEBUG_INFO, "Attempting to Load Bitstream Image %d at address 0x%08x\r\n", PartitionNum + 1, BitstreamStartAddress[PartitionNum]);
 
@@ -195,15 +225,16 @@ u32 LoadBootImage(void)
 	}
 	
 
-	if (PartitionNum >= 2 && Status != XST_SUCCESS)
+	if (PartitionNum >= BITSTREAM_IMAGE_NUMBER && Status != XST_SUCCESS)
 	{
 		fsbl_printf(DEBUG_GENERAL, "Bitstream failed to Load, inform CDH\r\n");
         //DO NOT Fallback - see if application still loads
+		//With XIP from BRAM, FSBL would not be able to load application if bitstream load fails
 		//FsblFallback();
 	}
 
 	// Load Application Image Second - only 3 images for now
-	for (PartitionNum = 0; PartitionNum < 3; PartitionNum++)
+	for (PartitionNum = 0; PartitionNum < APP_IMAGE_NUMBER; PartitionNum++)
 	{
 		fsbl_printf(DEBUG_INFO, "Attempting to Load Application Image %d at address 0x%08x\r\n", PartitionNum + 1, ApplicationStartAddress[PartitionNum]);
 
@@ -225,10 +256,11 @@ u32 LoadBootImage(void)
 	}
 
 	// If all 3 application images failed to load, then fallback
-	if ((PartitionNum >= 3 && Status != XST_SUCCESS) || (ExecutionAddressFlag == 0))
+	if ((PartitionNum >= APP_IMAGE_NUMBER && Status != XST_SUCCESS) || (ExecutionAddressFlag == 0))
 	{
 		fsbl_printf(DEBUG_GENERAL, "Application failed to Load, inform CDH\r\n");
 		FsblFallback(); // will require fallback in this case
+		// NOTHING CAN BE DONE IF APPLICATION DOES NOT LOAD
 	}
 
     fsbl_printf(DEBUG_INFO, "Returning execution address 0x%08x\r\n", ExecutionAddress);
@@ -258,7 +290,7 @@ u32 LoadBitstreamImage(u32 ImageBaseAddress)
 	u32 PartitionStartAddr;
 	u32 PartitionChecksumOffset;
 	u32 Status;
-	PartHeader LocalHeader;
+	PartHeader LocalHeader; // looks redundant - see if can be removed later
 	PartHeader *HeaderPtr = &LocalHeader;
 
 	// get partition's header table offset (relative to ImageBaseAddress)
@@ -296,13 +328,13 @@ u32 LoadBitstreamImage(u32 ImageBaseAddress)
 	}
 
 	// Load partition header information in to local variables (convert words to bytes)
-	PartitionDataLength = (HeaderPtr->DataWordLen);
-	PartitionImageLength = (HeaderPtr->ImageWordLen);
+	PartitionDataLength = (HeaderPtr->DataWordLen); //this is in words!!
+	PartitionImageLength = (HeaderPtr->ImageWordLen); //this is in words!!
 	PartitionAttr = HeaderPtr->PartitionAttr;
-	PartitionLoadAddr = HeaderPtr->LoadAddr;	//pcap transfer uses words for load address
-	PartitionChecksumOffset = (HeaderPtr->CheckSumOffset) << WORD_LENGTH_SHIFT;
-	PartitionStartAddr = (HeaderPtr->PartitionStart) << WORD_LENGTH_SHIFT;
-	PartitionTotalSize = (HeaderPtr->PartitionWordLen) << WORD_LENGTH_SHIFT;
+	PartitionLoadAddr = HeaderPtr->LoadAddr;	//pcap transfer uses words for load address (this is in words!!)
+	PartitionChecksumOffset = (HeaderPtr->CheckSumOffset) << WORD_LENGTH_SHIFT; // now in bytes
+	PartitionStartAddr = (HeaderPtr->PartitionStart) << WORD_LENGTH_SHIFT; // now in bytes
+	PartitionTotalSize = (HeaderPtr->PartitionWordLen) << WORD_LENGTH_SHIFT; // now in bytes
 
 
 	// check if partition owner is important later
@@ -355,6 +387,8 @@ u32 LoadBitstreamImage(u32 ImageBaseAddress)
 	}
 
 	// move bitstream to FPGA (or first thru DDR for checksum if needed - will change this behaviour for XIP later)
+	// likely stream as chunks to OCM for checksum and if valid, stread to OCM again and pipe to FPGA
+	// for now, move entire partition to DDR first, if checksum needed
 	Status = PartitionMove(ImageBaseAddress, HeaderPtr);
 		if (Status != XST_SUCCESS) 
 		{
@@ -406,7 +440,7 @@ u32 LoadApplicationImage(u32 ImageBaseAddress)
 	u32 PartitionStartAddr;
 	u32 PartitionChecksumOffset;
 	u32 Status;
-	PartHeader LocalHeader;
+	PartHeader LocalHeader; // looks redundant - see if can be removed later
 	PartHeader *HeaderPtr = &LocalHeader;
 
 	// get partition's header table offset (relative to ImageBaseAddress)
@@ -444,14 +478,14 @@ u32 LoadApplicationImage(u32 ImageBaseAddress)
 	}
 
 	// Load partition header information in to local variables (convert words to bytes)
-	PartitionDataLength = (HeaderPtr->DataWordLen) << WORD_LENGTH_SHIFT;
-	PartitionImageLength = (HeaderPtr->ImageWordLen) << WORD_LENGTH_SHIFT;
+	PartitionDataLength = (HeaderPtr->DataWordLen) << WORD_LENGTH_SHIFT; // now in bytes
+	PartitionImageLength = (HeaderPtr->ImageWordLen) << WORD_LENGTH_SHIFT; // now in bytes
 	PartitionExecAddr = HeaderPtr->ExecAddr;
 	PartitionAttr = HeaderPtr->PartitionAttr;
 	PartitionLoadAddr = HeaderPtr->LoadAddr;
-	PartitionChecksumOffset = (HeaderPtr->CheckSumOffset) << WORD_LENGTH_SHIFT;
-	PartitionStartAddr = (HeaderPtr->PartitionStart) << WORD_LENGTH_SHIFT;
-	PartitionTotalSize = (HeaderPtr->PartitionWordLen) << WORD_LENGTH_SHIFT;
+	PartitionChecksumOffset = (HeaderPtr->CheckSumOffset) << WORD_LENGTH_SHIFT; // now in bytes
+	PartitionStartAddr = (HeaderPtr->PartitionStart) << WORD_LENGTH_SHIFT; // now in bytes
+	PartitionTotalSize = (HeaderPtr->PartitionWordLen) << WORD_LENGTH_SHIFT; // now in bytes
 
 	// check if partition owner is important later - not currently used
 
@@ -1630,7 +1664,6 @@ u32 PartitionMove(u32 ImageBaseAddress, PartHeader *Header)
 	 */
 	if (PLPartitionFlag && (!(SignedPartitionFlag || PartitionChecksumFlag))) {
         fsbl_printf(DEBUG_INFO, "Load Bitstream to FPGA if no checksum\r\n");
-        //PcapDumpRegisters(); //******ADDED******
 		Status = PcapLoadPartition((u32*)SourceAddr,
 					(u32*)Header->LoadAddr,
 					Header->ImageWordLen,

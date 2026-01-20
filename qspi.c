@@ -886,28 +886,23 @@ u32 SendBankSelect(u8 BankSel)
 
 u32 QspiSetIOMode(void)
 {
-	//QspiInstancePtr
 	u32 ConfigReg;
 	u32 ConfigBase = QspiInstancePtr->Config.BaseAddress;
 
 	// Print contents of LQSPI CR register before change
+	ConfigReg = XQspiPs_GetLqspiConfigReg(QspiInstancePtr);
 	fsbl_printf(DEBUG_INFO, "LQSPI Config Register before I/O mode change: 0x%08X\r\n",
-		XQspiPs_GetLqspiConfigReg(QspiInstancePtr));
+		ConfigReg);
 
 	// Disable the controller
 	XQspiPs_Disable(QspiInstancePtr);
 
-	// keep master + SSFORCE (allows for manual CS control), and keep in Flash memory interface mode
-	ConfigReg = XQspiPs_ReadReg(ConfigBase, XQSPIPS_CR_OFFSET);
+	// Drop only the linear-mode bit; keep opcode/dummy/two-mem fields intact
+	ConfigReg &= ~XQSPIPS_LQSPI_CR_LINEAR_MASK;
+	XQspiPs_SetLqspiConfigReg(QspiInstancePtr, ConfigReg);
 
-	// Disabled Manual Start Control, so that as soon as data in TX FIFO, transfer starts
-	// ConfigReg |= XQSPIPS_CR_MSTREN_MASK; // Default is Auto-start mode
-	ConfigReg |= XQSPIPS_CR_SSFORCE_MASK;
-
-	XQspiPs_WriteReg(ConfigBase, XQSPIPS_CR_OFFSET, ConfigReg);
-
-	// Disable Linear mode
-	XQspiPs_SetLqspiConfigReg(QspiInstancePtr, 0x0);
+	// We are no longer using linear addressing; force non-linear flow in QspiAccess
+	LinearBootDeviceFlag = 0;
 
 	// Enable the controller
 	XQspiPs_Enable(QspiInstancePtr);

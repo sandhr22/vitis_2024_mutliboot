@@ -76,6 +76,8 @@ extern "C" {
 
 #define ATTRIBUTE_PARTITION_OWNER_FSBL	0x00000	/* FSBL Partition Owner */
 
+//TODO: Should a boot image header checksum be performed????
+// Don't see how it adds value, since each partition header and the payload is checksummed
 
 /**************************** Type Definitions *******************************/
 typedef u32 (*ImageMoverType)( u32 SourceAddress,
@@ -83,24 +85,32 @@ typedef u32 (*ImageMoverType)( u32 SourceAddress,
 				u32 LengthBytes);
 
 typedef struct StructPartHeader {
-	u32 ImageWordLen;	/* 0x0 */
-	u32 DataWordLen;	/* 0x4 */
-	u32 PartitionWordLen;	/* 0x8 */
-	u32 LoadAddr;		/* 0xC */
-	u32 ExecAddr;		/* 0x10 */
-	u32 PartitionStart;	/* 0x14 */
-	u32 PartitionAttr;	/* 0x18 */
-	u32 SectionCount;	/* 0x1C */
-	u32 CheckSumOffset;	/* 0x20 */
+	u32 ImageWordLen;	/* 0x0 */	// length of the ENCRYPTED image in words
+	u32 DataWordLen;	/* 0x4 */	// length of the DECRYPTED data in words (should be same as image won't be encrypted)
+	u32 PartitionWordLen;	/* 0x8 */	// length of the partition in words (includes header, image, padding) (if no encryption or authentication, should be same as the above two)
+	u32 LoadAddr;		/* 0xC */	// Load addr with respect to DDR
+	u32 ExecAddr;		/* 0x10 */ 	// Addr to start executing (with respect to DDR???)
+	u32 PartitionStart;	/* 0x14 */ // Partition start offset (in words) with respect to start of bootimage
+	u32 PartitionAttr;	/* 0x18 */	// Partition attributes like destination device (PS/PL), checksum type, RSA present etc.
+	u32 SectionCount;	/* 0x1C */	//Number of loadable sections in this partition
+	u32 CheckSumOffset;	/* 0x20 */	// Offset to checksum in words of the partition image
 	u32 Pads1[1];
-	u32 ACOffset;	/* 0x28 */
+	u32 ACOffset;	/* 0x28 */	//word offset to the RSA signature/authentication code
 	u32 Pads2[4];
-	u32 CheckSum;		/* 0x3C */
+	u32 CheckSum;		/* 0x3C */	// Header Checksum (for 15 words above)
 }PartHeader;
 
 struct HeaderArray {
-	u32 Fields[16];
+	u32 Fields[16]; 
 };
+
+/**************************** User-Defined Type Definitions *******************************/
+typedef struct {
+	u32 MagicNumber; 
+	u32 ImageStatus; // use union to represent ImageStatus bits!
+	u32 ActiveApp; // use another (or same) union to represent ActiveApp bits
+	u8 MD5CheckSum[16];	// MD5_CHECKSUM_SIZE
+} XipMetaData;
 
 
 /***************** Macros (Inline Functions) Definitions *********************/
@@ -128,6 +138,10 @@ u32 LoadBootImage(void);
 u32 LoadBitstreamImage(u32 ImageStartAddress);
 u32 LoadApplicationImage(u32 ImageStartAddress);
 u32 LoadSinglePartitionHeaderInfo(u32 PartHeaderOffset,  PartHeader *Header);
+
+u32 WriteXipMetadata(u32 Address, XipMetaData *MetaDataInstance);
+u32 UpdateMetaData(XipMetaData *MetaDataInstance); // first complete checksum with new fields and then update both metadata locations
+u32 CheckMetaData(XipMetaData *MetaDataInstance); // check metadata struct for correct checksum and magic number
 
 /************************** Variable Definitions *****************************/
 
