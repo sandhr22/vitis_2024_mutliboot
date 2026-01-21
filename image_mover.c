@@ -105,7 +105,7 @@
 #define SLOT_METADATA_ADDRESS1 0x00FFD000 //Third last 4K sector of 16MB QSPI flash - 127.90625 Mib
 #define SLOT_METADATA_ADDRESS2 0x00FFF000 //Last 4K sector of 16MB QSPI flash - 127.96875 Mib
 
-#define PAGE_PROGRAM_CMD 0x02 // Page Program command for QSPI flash (equivalent to XQSPIPS_FLASH_OPCODE_PP)
+#define PAGE_PROGRAM_DUMMY 0x02 // Page Program command for QSPI flash (equivalent to XQSPIPS_FLASH_OPCODE_PP)
 #define COMMAND_OFFSET 0 // command byte in write buffer of XQspiPs_PolledTransfer
 #define ADDRESS_1_OFFSET 1 // MSB of address in 16 MB sized QSPI flash chip in XQspiPs_PolledTransfer
 #define ADDRESS_2_OFFSET 2 // Middle byte of address
@@ -154,10 +154,147 @@ extern u8 LinearBootDeviceFlag;
 extern XDcfg *DcfgInstPtr;
 
 
-// add all logic for METADATA here
+u32 WriteXipMetadata(u32 Address, XipMetaData *MetaDataInstance) 
+{
+	/*
+	Byte 0 		Byte 1 			Byte 2 			Byte 3 			Remaining Bytes
+	SPI command Address[23:16] 	Address[15:8] 	Address[7:0] 	Transmit data
+	*/
+	//BE Careful with allocated buffer size - turn into macro
+	u8 WriteBuffer[32];  // 1 byte (write command) + 3 byte (address) + 28 bytes (MetaDataInstance)
+    u32 Status;
+	XipMetaData ReadMetaDataInstance; // local copy to read back and verify
 
+	//Call function for erase sector (pass address)
+	Status = EraseSector(Address);
+	if (Status != XST_SUCCESS)
+	{
+		return Status;
+	}
+	
+	// Setup the WriteBuffer for Page program
+	WriteBuffer[COMMAND_OFFSET]   = PAGE_PROGRAM_DUMMY;  // Page Program - WritePage will overwrite this with actual OPCODE macro
+    WriteBuffer[ADDRESS_1_OFFSET] = (u8)((Address >> 16) & 0xFF);
+    WriteBuffer[ADDRESS_2_OFFSET] = (u8)((Address >> 8) & 0xFF);
+    WriteBuffer[ADDRESS_3_OFFSET] = (u8)(Address & 0xFF);
 
+	// Step 4: Copy entire struct to buffer (28 bytes)
+    memcpy(&WriteBuffer[WRITE_BUFFER_DATA_OFFSET], MetaDataInstance, sizeof(XipMetaData));
 
+	//Call function for write enable + page write (send address, data, and write buffer size 4 + sizeof(XipMetaData))
+	Status = WritePage(WriteBuffer, 32);
+	if (Status != XST_SUCCESS)
+	{
+		fsbl_printf(DEBUG_GENERAL, "Failed to write XIP meta data to 0x%08X\r\n", Address);
+	}
+
+	//read value back to verify
+	Status = MoveImage(Address, (u32)&ReadMetaDataInstance, sizeof(XipMetaData));
+	if (Status != XST_SUCCESS)
+	{
+		fsbl_printf(DEBUG_GENERAL, "Failed to read back metadata at address 0x%08X\r\n", Address);
+		return Status;
+	}
+
+	// Verify the written metadata
+	if (CheckMetaData(&ReadMetaDataInstance) != XST_SUCCESS)
+	{		
+		fsbl_printf(DEBUG_GENERAL, "Metadata at address 0x%08X is incorrect\r\n", Address);
+		return XST_FAILURE;
+	}
+
+    fsbl_printf(DEBUG_GENERAL, "Metadata at address 0x%08X is correct, update worked\r\n", Address);
+	
+	return XST_SUCCESS;
+}
+
+///*****************************************************************************/
+/**
+*
+* Ensure magic number and checksum of metadata struct are valid
+*
+* @param	MetaDataInstance - Pointer to the metadata instance to check
+*
+* @return	- XST_SUCCESS if valid, else XST_FAILURE
+*
+* @note		None
+*
+****************************************************************************/
+u32 CheckMetaData(XipMetaData *MetaDataInstance) 
+{
+	u8 CalculatedMD5[MD5_CHECKSUM_SIZE];
+    u32 Index;
+	
+	// Verify magic number
+    if (MetaDataInstance->MagicNumber != SLOT_MAGIC_NUMBER) 
+	{
+		fsbl_printf(DEBUG_GENERAL, "Metadata magic number mismatch: 0x%08X\r\n", MetaDataInstance->MagicNumber);
+        return XST_FAILURE;
+    }
+    
+    // Calculate MD5 over first 3 fields / 12 bytes (MagicNumber + ImageStatus + ActiveApp)
+    md5((u8*)MetaDataInstance, 12, CalculatedMD5, 0);
+    
+    // Compare with stored MD5
+    for (Index = 0; Index < MD5_CHECKSUM_SIZE; Index++) {
+        if (MetaDataInstance->MD5CheckSum[Index] != CalculatedMD5[Index]) 
+		{
+			fsbl_printf(DEBUG_GENERAL, "Metadata checksum mismatch at index %d\r\n", Index);
+            return XST_FAILURE;
+        }
+    }
+    
+    return XST_SUCCESS;
+}
+
+///*****************************************************************************/
+/**
+*
+* Update metadata checksum and write to both metadata slots
+*
+* @param	MetaDataInstance - Pointer to the metadata instance to check
+*
+* @return	- XST_SUCCESS if valid, else XST_FAILURE
+*
+* @note		None
+*
+****************************************************************************/
+u32 UpdateMetaData(XipMetaData *MetaDataInstance) 
+{
+	u32 Status;
+    
+    // Calculate MD5 over first 12 bytes of struct
+    md5((u8*)MetaDataInstance, 12, MetaDataInstance->MD5CheckSum, 0);
+    
+    // Write to both metadata locations
+	//slot 1
+    Status = WriteXipMetadata(SLOT_METADATA_ADDRESS1, MetaDataInstance);
+	if (Status != XST_SUCCESS) 
+	{
+	    fsbl_printf(DEBUG_GENERAL, "Failed to write Metadata Slot 1 at 0x%08X, will try again\r\n", SLOT_METADATA_ADDRESS1);
+	    // return XST_FAILURE;
+		Status = WriteXipMetadata(SLOT_METADATA_ADDRESS1, MetaDataInstance);
+		if (Status != XST_SUCCESS) 
+		{
+		    fsbl_printf(DEBUG_GENERAL, "Failed to write Metadata Slot 1 at 0x%08X again, this location failed\r\n", SLOT_METADATA_ADDRESS1);
+		}
+	}
+	//slot 2
+	Status = WriteXipMetadata(SLOT_METADATA_ADDRESS2, MetaDataInstance);
+	if (Status != XST_SUCCESS) 
+	{
+	    fsbl_printf(DEBUG_GENERAL, "Failed to write Metadata Slot 2 at 0x%08X, will try again\r\n", SLOT_METADATA_ADDRESS2);
+	    // return XST_FAILURE;
+		Status = WriteXipMetadata(SLOT_METADATA_ADDRESS2, MetaDataInstance);
+		if (Status != XST_SUCCESS) 
+		{
+		    fsbl_printf(DEBUG_GENERAL, "Failed to write Metadata Slot 2 at 0x%08X again, this location failed\r\n", SLOT_METADATA_ADDRESS2);
+		}
+	    // return XST_FAILURE;
+	}
+
+    return Status;
+}
 
 ///*****************************************************************************/
 /**
