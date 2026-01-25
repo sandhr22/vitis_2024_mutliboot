@@ -135,13 +135,23 @@ u32 DecryptPartition(u32 StartAddr, u32 DataLength, u32 ImageLength);
 
 /************************** User-Defined Function Prototypes ******************************/
 u32 LoadBootImage(void);
-u32 LoadBitstreamImage(u32 ImageStartAddress);
-u32 LoadApplicationImage(u32 ImageStartAddress);
+u32 LoadBitstreamImage(u32 ImageBaseAddress);
+u32 LoadApplicationImage(u32 ImageBaseAddress);
 u32 LoadSinglePartitionHeaderInfo(u32 PartHeaderOffset,  PartHeader *Header);
 
 u32 WriteXipMetadata(u32 Address, XipMetaData *MetaDataInstance);
 u32 UpdateMetaData(XipMetaData *MetaDataInstance); // first complete checksum with new fields and then update both metadata locations
 u32 CheckMetaData(XipMetaData *MetaDataInstance); // check metadata struct for correct checksum and magic number
+
+//TODO: Pass ImageStartAddress and partition header info to the 
+u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootloader); //decouple the validation from final image loading
+																					//always fail an image if not valid or doesn't contain md5 flag or app/bitstream flag
+u32 ValidateFsblImage(u32 ImageAddress); // validate all FBSL boot images, including their bootheaders. 
+									     // either perform a similar validation structure, checking partition image/header along with bootheader
+										// or check to see if each image is a duplicate of the current image that was picked by BOOTROM (and is in OCM)
+
+u32 CalculateMd5(u32 SourceAddr, u32 DataLength, u8 *Checksum);
+u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset)
 
 /************************** Variable Definitions *****************************/
 
