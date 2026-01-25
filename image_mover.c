@@ -112,6 +112,8 @@
 #define ADDRESS_3_OFFSET 3 // LSB of address 
 #define WRITE_BUFFER_DATA_OFFSET 4	// start byte for data in write buffer of XQspiPs_PolledTransfer()
 
+#define CHUNK_SIZE		4096 //Max amount of data to move at a time with FlashRead (4KB)
+
 /**************************** Type Definitions *******************************/
 
 /***************** Macros (Inline Functions) Definitions *********************/
@@ -158,7 +160,18 @@ extern XDcfg *DcfgInstPtr;
 
 
 
+/*
+TODO: 
+1) Add an array of fixed size with part headers for each boot image - separate app, bitstream, fsbl images
+2) Validate each image first and have a corresponding struct for indicating if an image is valid or not
+3) The target image (for now, the top one) will then run if it is valid
+	3a) Check App and Bitstream for checksums in partition header, in partition payload, md5 attribute flag, and PS/PL attribute flag
+	3b) Check each FSBL image's boot image entirely (as that is what BOOTROM does)
 
+4) Go following priority of each image (loaded newest -> golden), and load the first valid one
+5) Requires LoadAppImage and LoadBitstreamImage to be reworked to just load the image if valid, not validate it
+    5a) Or validate one more time before loading - this time, just call the function that validates
+*/
 ///*****************************************************************************/
 /**
 *
@@ -1843,5 +1856,54 @@ u32 CalcPartitionChecksum(u32 SourceAddr, u32 DataLength, u8 *Checksum)
 	md5((u8*)SourceAddr, DataLength, Checksum, 0 );
 
     return XST_SUCCESS;
+}
+
+
+/******************************************************************************/
+/**
+*
+* User-defined function to calculate image checksum using MD5 algorithm
+* Streams chunks of 4KB data to OCM to hash partition without copying all to active memory
+*
+* @param 	Start address
+* @param 	Length of the data
+* @param 	Checksum pointer
+*
+* @return
+*		- XST_SUCCESS if Checksum calculate successful
+*		- XST_FAILURE if Checksum calculate failed
+*
+* @note		None
+*
+*******************************************************************************/
+u32 CalculateMd5(u32 sourceAddr, u32 DataLength, u8 *Checksum)
+{
+	u32 Status;
+	u32 ChunkSize;
+	u32 remainingBytes = DataLength;
+	u8 Datapiece[CHUNK_SIZE]; // allocate chunk size buffer in OCM
+
+	MD5Context context;
+
+	MD5Init(&context);
+	
+	while (remainingBytes > 0) {
+		ChunkSize = (remainingBytes > CHUNK_SIZE) ? CHUNK_SIZE : remainingBytes;
+
+		// Move chunk from source address to OCM buffer
+		Status = MoveImage(sourceAddr, (u32)Datapiece, ChunkSize);
+		if (Status != XST_SUCCESS) {
+			fsbl_printf(DEBUG_GENERAL, "Move Image failed\r\n");
+			return XST_FAILURE;
+		}
+
+		// Update MD5 with the chunk data
+		MD5Update(&context, Datapiece, ChunkSize, 0);
+
+		sourceAddr += ChunkSize;
+		remainingBytes -= ChunkSize;
+	}
+
+	MD5Final(&context, Checksum, 0);
 }
 
