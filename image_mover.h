@@ -151,7 +151,7 @@ u32 ValidateFsblImage(u32 ImageAddress); // validate all FBSL boot images, inclu
 										// or check to see if each image is a duplicate of the current image that was picked by BOOTROM (and is in OCM)
 
 u32 CalculateMd5(u32 SourceAddr, u32 DataLength, u8 *Checksum);
-u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset)
+u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset);
 
 /************************** Variable Definitions *****************************/
 
@@ -161,7 +161,3 @@ u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset)
 
 
 #endif /* ___IMAGE_MOVER_H___ */
-
-
-
-

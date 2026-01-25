@@ -244,6 +244,16 @@ u32 LoadBootImage(void)
 	}
 
 	// TODO: Validate FSBLs
+	fsbl_printf(DEBUG_INFO, "Validating FSBL Boot Images\r\n");
+	Status = ValidateFsblImage(0); // pass 0 to validate current boot image only
+	if (Status != XST_SUCCESS)
+	{
+		fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image Validation Failed\r\n");
+	}
+	else
+	{
+		fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image Validation Successful\r\n");
+	}
 
 	// Validate Bitstreams
 	for (PartitionNum = 0; PartitionNum < BITSTREAM_IMAGE_NUMBER; PartitionNum++)
@@ -802,6 +812,9 @@ u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootlo
 		OutputStatus(INVALID_HEADER_FAIL);
 		return XST_FAILURE;
 	}
+	
+	// TODO: Only init local variables for what you need, like PartitionAttr, PartitionStartAddr, 
+	// PartitionTotalSize, PartitionChecksumOffset
 
 	// Load partition header information in to local variables (convert words to bytes)
 	PartitionDataLength = (HeaderPtr->DataWordLen) << WORD_LENGTH_SHIFT; // now in bytes
@@ -858,7 +871,11 @@ u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootlo
 	}
 
 	// validate partition data with checksum
-	Status = ValidateChecksum(PartitionStartAddr, PartitionTotalSize, (ImageBaseAddress + PartitionChecksumOffset));
+	/*
+	 * Validate directly from flash: use absolute flash address (boot image base + partition offset)
+	 * so the hash covers the same bytes that were used when the checksum was generated.
+	 */
+	Status = ValidateChecksum(ImageBaseAddress + PartitionStartAddr, PartitionTotalSize, ImageBaseAddress + PartitionChecksumOffset);
 	if (Status != XST_SUCCESS) 
 	{
 		fsbl_printf(DEBUG_GENERAL,"PARTITION_CHECKSUM_FAIL\r\n");
@@ -2169,6 +2186,8 @@ u32 CalculateMd5(u32 sourceAddr, u32 DataLength, u8 *Checksum)
 		sourceAddr += ChunkSize;
 		remainingBytes -= ChunkSize;
 	}
+
+	fsbl_printf(DEBUG_INFO, "MD5 Calculation Done - remaining bytes = %d\r\n", remainingBytes);
 
 	MD5Final(&context, Checksum, 0);
 	return XST_SUCCESS;
