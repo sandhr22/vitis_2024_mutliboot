@@ -98,6 +98,7 @@
 
 #define APP_IMAGE_NUMBER 3 // Number of application images available
 #define BITSTREAM_IMAGE_NUMBER 2 // Number of bitstream images available
+#define FSBL_IMAGE_NUMBER 2 // Number of FSBL boot images available
 
 #define SLOT_MAGIC_NUMBER 0xA1B2C3D4 // Magic number to for XIP metadata struct
 
@@ -162,7 +163,17 @@ extern XDcfg *DcfgInstPtr;
 
 
 // add all logic for METADATA here
-
+typedef union 
+{
+    u32 imageStatusWord;  // packed 32-bit view
+    struct 
+	{
+        u8 fsbl_images;      // byte 0 (LSB)
+		u8 bitstream_images; // byte 1
+        u8 app_images;       // byte 2
+        u8 reserved;         // byte 3
+    } bytes;
+} ImageStatusTable;
 
 
 /*
@@ -201,26 +212,10 @@ u32 LoadBootImage(void)
 	u32 BitstreamStartAddress[] = {BITSTREAM_ADDRESS1, BITSTREAM_ADDRESS2};
 	u32 ApplicationStartAddress[] = {APPLICATION_ADDRESS1, APPLICATION_ADDRESS2, APPLICATION_ADDRESS3};
 
-	// not used for now
-	// maybe make into union with bit fields
-	struct ImageStatusTable{
-		u32 fsbl_golden : 1;
-		u32 fsbl_1 : 1;
-		u32 fsbl_2 : 1;
-		u32 fsbl_padding : 5; // in case more fsbl images are added later
+	PartHeader BitstreamHeaders[BITSTREAM_IMAGE_NUMBER];
+	PartHeader ApplicationHeaders[APP_IMAGE_NUMBER];
 
-		u32 app_golden : 1;
-		u32 app_1 : 1;
-		u32 app_2 : 1;
-		u32 app_padding : 5; // in case more app images are added later
-
-		u32 bitstream_golden : 1;
-		u32 bitstream_1 : 1;
-		u32 bitstream_padding : 6; // in case more bitstream images are added later
-
-		u32 reserved : 8;
-
-	};
+	ImageStatusTable ImageStatus = {0};
 
 	// Resetting the Flags for which partition type is loaded
 	BitstreamFlag = 0;
@@ -243,16 +238,23 @@ u32 LoadBootImage(void)
 		fsbl_printf(DEBUG_GENERAL, "QspiSetIOMode Failed\r\n");
 	}
 
-	// TODO: Validate FSBLs
-	fsbl_printf(DEBUG_INFO, "Validating FSBL Boot Images\r\n");
-	Status = ValidateFsblImage(0); // pass 0 to validate current boot image only
-	if (Status != XST_SUCCESS)
+	//TODO: Figure out order of images - if golden image is higher in address space or lower!!!!
+
+	// Validate FSBL Boot Images First
+	for (PartitionNum = 0; PartitionNum < FSBL_IMAGE_NUMBER; PartitionNum++)
 	{
-		fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image Validation Failed\r\n");
-	}
-	else
-	{
-		fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image Validation Successful\r\n");
+		// NOTE: Currently only validating fsbl at offset 0!!!
+		fsbl_printf(DEBUG_INFO, "Validating FSBL Boot Image %d at address 0x%08x\r\n", PartitionNum + 1, 0);
+		Status = ValidateFsblImage(0); 
+		if (Status != XST_SUCCESS) 
+		{
+			fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image %d Validation Failed\r\n", PartitionNum + 1);
+		}
+		else
+		{
+			fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image %d Validation Successful\r\n", PartitionNum + 1);
+			ImageStatus.bytes.fsbl_images |= (1U << PartitionNum); 
+		}	
 	}
 
 	// Validate Bitstreams
@@ -260,7 +262,7 @@ u32 LoadBootImage(void)
 	{
 		fsbl_printf(DEBUG_INFO, "Validating Bitstream Image %d at address 0x%08x\r\n", PartitionNum + 1, BitstreamStartAddress[PartitionNum]);
 
-		Status = ValidatePartitionImage(BitstreamStartAddress[PartitionNum], 0, 0);
+		Status = ValidatePartitionImage(BitstreamStartAddress[PartitionNum], 0, &(BitstreamHeaders[PartitionNum]));
 		if (Status != XST_SUCCESS) 
 		{
 			fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d Validation Failed\r\n", PartitionNum + 1);
@@ -268,6 +270,7 @@ u32 LoadBootImage(void)
 		else
 		{
 			fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d Validation Successful\r\n", PartitionNum + 1);
+			ImageStatus.bytes.bitstream_images |= (1U << PartitionNum);
 		}
 		
 	}
@@ -277,7 +280,7 @@ u32 LoadBootImage(void)
 	{
 		fsbl_printf(DEBUG_INFO, "Validating Application Image %d at address 0x%08x\r\n", PartitionNum + 1, ApplicationStartAddress[PartitionNum]);
 
-		Status = ValidatePartitionImage(ApplicationStartAddress[PartitionNum], 1, 0);
+		Status = ValidatePartitionImage(ApplicationStartAddress[PartitionNum], 1, &(ApplicationHeaders[PartitionNum]));
 		if (Status != XST_SUCCESS) 
 		{
 			fsbl_printf(DEBUG_GENERAL, "Application Image %d Validation Failed\r\n", PartitionNum + 1);
@@ -285,27 +288,40 @@ u32 LoadBootImage(void)
 		else
 		{
 			fsbl_printf(DEBUG_GENERAL, "Application Image %d Validation Successful\r\n", PartitionNum + 1);
+			ImageStatus.bytes.app_images |= (1U << PartitionNum);
 		}
 		
 	}
+
+	fsbl_printf(DEBUG_INFO, "Image Status Word: 0x%08x\r\n", ImageStatus.imageStatusWord);
 
 	// Load Bitstream Image First - only 2 images for now
 	for (PartitionNum = 0; PartitionNum < BITSTREAM_IMAGE_NUMBER; PartitionNum++)
 	{
 		fsbl_printf(DEBUG_INFO, "Attempting to Load Bitstream Image %d at address 0x%08x\r\n", PartitionNum + 1, BitstreamStartAddress[PartitionNum]);
 
-		Status = LoadBitstreamImage(BitstreamStartAddress[PartitionNum]);
-		if (Status != XST_SUCCESS) 
+		if(ImageStatus.bytes.bitstream_images & (1U << PartitionNum))
 		{
-			fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d Load Failed\r\n", PartitionNum + 1);
-			BitstreamFlag = 0; // Reset flag if load failed
-			PLPartitionFlag = 0; // Reset flag if load failed
-			PartitionChecksumFlag = 0; // Reset flag if load failed
+			fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d is valid, attempting to load\r\n", PartitionNum + 1);
+			Status = LoadBitstreamImage(BitstreamStartAddress[PartitionNum], &(BitstreamHeaders[PartitionNum]));
+
+			if (Status != XST_SUCCESS) 
+			{
+				fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d Load Failed\r\n", PartitionNum + 1);
+				BitstreamFlag = 0; // Reset flag if load failed
+				PLPartitionFlag = 0; // Reset flag if load failed
+				PartitionChecksumFlag = 0; // Reset flag if load failed
+			}
+			else
+			{
+				fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d Load Successful\r\n", PartitionNum + 1);
+				break; // Exit for loop if bitstream loaded successfully
+			}
 		}
+
 		else
 		{
-			fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d Load Successful\r\n", PartitionNum + 1);
-			break; // Exit for loop if bitstream loaded successfully
+			fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d is invalid, skipping load\r\n", PartitionNum + 1);
 		}
 	}
 	
@@ -313,6 +329,7 @@ u32 LoadBootImage(void)
 	if (PartitionNum >= BITSTREAM_IMAGE_NUMBER && Status != XST_SUCCESS)
 	{
 		fsbl_printf(DEBUG_GENERAL, "Bitstream failed to Load, inform CDH\r\n");
+
         //DO NOT Fallback - see if application still loads
 		//With XIP from BRAM, FSBL would not be able to load application if bitstream load fails
 		//FsblFallback();
@@ -322,21 +339,30 @@ u32 LoadBootImage(void)
 	for (PartitionNum = 0; PartitionNum < APP_IMAGE_NUMBER; PartitionNum++)
 	{
 		fsbl_printf(DEBUG_INFO, "Attempting to Load Application Image %d at address 0x%08x\r\n", PartitionNum + 1, ApplicationStartAddress[PartitionNum]);
-
-		Status = LoadApplicationImage(ApplicationStartAddress[PartitionNum]);
-		if (Status != XST_SUCCESS)
+		if(ImageStatus.bytes.app_images & (1U << PartitionNum))
 		{
-			fsbl_printf(DEBUG_GENERAL, "Application Image %d Load Failed\r\n", PartitionNum + 1);
-			ApplicationFlag = 0; // Reset flag if load failed
-			ExecutionAddressFlag = 0; // Reset flag if load failed
-			ExecutionAddress = 0; // Reset execution address if load failed
-			PSPartitionFlag = 0; // Reset flag if load failed
-			PartitionChecksumFlag = 0; // Reset flag if load failed
+			fsbl_printf(DEBUG_GENERAL, "Application Image %d is valid, attempting to load\r\n", PartitionNum + 1);
+			Status = LoadApplicationImage(ApplicationStartAddress[PartitionNum], &(ApplicationHeaders[PartitionNum]));
+
+			if (Status != XST_SUCCESS) 
+			{
+				fsbl_printf(DEBUG_GENERAL, "Application Image %d Load Failed\r\n", PartitionNum + 1);
+				ApplicationFlag = 0; // Reset flag if load failed
+				ExecutionAddressFlag = 0; // Reset flag if load failed
+				ExecutionAddress = 0; // Reset execution address if load failed
+				PSPartitionFlag = 0; // Reset flag if load failed
+				PartitionChecksumFlag = 0; // Reset flag if load failed
+			}
+			else
+			{
+				fsbl_printf(DEBUG_GENERAL, "Application Image %d Load Successful\r\n", PartitionNum + 1);
+				break; // Exit for loop if application loaded successfully
+			}
 		}
+
 		else
 		{
-			fsbl_printf(DEBUG_GENERAL, "Application Image %d Load Successful\r\n", PartitionNum + 1);
-			break; // Exit for loop if application loaded successfully
+			fsbl_printf(DEBUG_GENERAL, "Application Image %d is invalid, skipping load\r\n", PartitionNum + 1);
 		}
 	}
 
@@ -365,8 +391,10 @@ u32 LoadBootImage(void)
 *
 ****************************************************************************/
 
-u32 LoadBitstreamImage(u32 ImageBaseAddress)
+u32 LoadBitstreamImage(u32 ImageBaseAddress, PartHeader *HeaderPtr)
 {
+	//HeaderPtr already populated with partition header info
+	u32 Status;
 	u32 PartitionDataLength;
 	u32 PartitionImageLength;
 	u32 PartitionTotalSize;
@@ -374,43 +402,10 @@ u32 LoadBitstreamImage(u32 ImageBaseAddress)
 	u32 PartitionLoadAddr;
 	u32 PartitionStartAddr;
 	u32 PartitionChecksumOffset;
-	u32 Status;
-	PartHeader LocalHeader; // looks redundant - see if can be removed later
-	PartHeader *HeaderPtr = &LocalHeader;
-
-	// get partition's header table offset (relative to ImageBaseAddress)
-	u32 PartitionHeaderOffset;
-    Status = GetPartitionHeaderStartAddr(ImageBaseAddress, &PartitionHeaderOffset);
-    if (Status != XST_SUCCESS) 
-	{
-    	fsbl_printf(DEBUG_GENERAL, "Get Header Start Address Failed\r\n");
-		OutputStatus(GET_HEADER_INFO_FAIL);
-    	return XST_FAILURE;
-    }
-
-	// Header offset relative to base address of QSPI flash 
-	PartitionHeaderOffset += ImageBaseAddress;
-
-	// Load Partition Header Information to HeaderPtr
-	Status = LoadSinglePartitionHeaderInfo(PartitionHeaderOffset, HeaderPtr);
-	if (Status != XST_SUCCESS) 
-	{
-		fsbl_printf(DEBUG_GENERAL, "Load Partition Header Info Failed\r\n");
-		OutputStatus(GET_HEADER_INFO_FAIL);
-		return XST_FAILURE;
-	}
 
 	// print partition header information
+	fsbl_printf(DEBUG_INFO, "Chosen Bitstream's Partition Header Information:\r\n");
 	HeaderDump(HeaderPtr);
-
-	// Validate partition header
-	Status = ValidateHeader(HeaderPtr);
-	if (Status != XST_SUCCESS) 
-	{
-		fsbl_printf(DEBUG_GENERAL, "INVALID_HEADER_FAIL\r\n");
-		OutputStatus(INVALID_HEADER_FAIL);
-		return XST_FAILURE;
-	}
 
 	// Load partition header information in to local variables (convert words to bytes)
 	PartitionDataLength = (HeaderPtr->DataWordLen); //this is in words!!
@@ -421,55 +416,17 @@ u32 LoadBitstreamImage(u32 ImageBaseAddress)
 	PartitionStartAddr = (HeaderPtr->PartitionStart) << WORD_LENGTH_SHIFT; // now in bytes
 	PartitionTotalSize = (HeaderPtr->PartitionWordLen) << WORD_LENGTH_SHIFT; // now in bytes
 
+	//since validation already completed, just set flags accordingly
+	PLPartitionFlag = 1;
+	PSPartitionFlag = 0;
+	BitstreamFlag = 1;
+	PartitionChecksumFlag = 1;
 
-	// check if partition owner is important later
-
-	// check if partition is PL image
-	if (PartitionAttr & ATTRIBUTE_PL_IMAGE_MASK) 
-	{
-		fsbl_printf(DEBUG_INFO, "Bitstream\r\n");
-		PLPartitionFlag = 1;
-		PSPartitionFlag = 0;
-		BitstreamFlag = 1;
-		//shouldn't happen - but check if application already loaded
-		if (ApplicationFlag == 1) 
-		{
-//#ifdef STDOUT_BASEADDRESS
-			fsbl_printf(DEBUG_GENERAL, "\r\nFSBL Warning !!! Bitstream not loaded into PL\r\n");
-			fsbl_printf(DEBUG_GENERAL, "Partition order invalid\r\n");
-			OutputStatus(INVALID_HEADER_FAIL);
-			return XST_FAILURE;
-//#endif
-		}
-	}
-	else 
-	{
-		fsbl_printf(DEBUG_INFO, "Bitstream Mask not set in Bitstream Partition, BAD!\r\n");
-		OutputStatus(INVALID_HEADER_FAIL);
-		return XST_FAILURE;
-	}
-
-	//Ensure partition attribute is not set to PS image
-	if (PartitionAttr & ATTRIBUTE_PS_IMAGE_MASK) {
-		fsbl_printf(DEBUG_INFO, "Application Mask in Bitstream Partition, BAD!\r\n");
-		OutputStatus(INVALID_HEADER_FAIL);
-		return XST_FAILURE;
-	}
-
-	//**NOTE** will not check for encryption/RSA in bitstream
+	// will not check for encryption/RSA in bitstream
 	EncryptedPartitionFlag = 0;
 	SignedPartitionFlag = 0;
 
-	// check for partition checksum
-	if (PartitionAttr & ATTRIBUTE_CHECKSUM_TYPE_MASK) 
-	{
-		fsbl_printf(DEBUG_INFO, "Checksum Present\r\n");
-		PartitionChecksumFlag = 1;
-	} 
-	else 
-	{
-		PartitionChecksumFlag = 0;
-	}
+	//TODO: Change logic below to stream bitstream directly to fabric (or first staging in OCM if needed and moving in chunks)
 
 	// move bitstream to FPGA (or first thru DDR for checksum if needed - will change this behaviour for XIP later)
 	// likely stream as chunks to OCM for checksum and if valid, stread to OCM again and pipe to FPGA
@@ -513,8 +470,12 @@ u32 LoadBitstreamImage(u32 ImageBaseAddress)
 	return XST_SUCCESS;
 }
 
-u32 LoadApplicationImage(u32 ImageBaseAddress)
+u32 LoadApplicationImage(u32 ImageBaseAddress, PartHeader *HeaderPtr)
 {
+	//HeaderPtr already populated with partition header info
+	u32 Status;
+
+	// may delete below and access fields directly from HeaderPtr
 	u32 PartitionDataLength;
 	u32 PartitionImageLength;
 	u32 PartitionTotalSize;
@@ -523,43 +484,12 @@ u32 LoadApplicationImage(u32 ImageBaseAddress)
 	u32 PartitionLoadAddr;
 	u32 PartitionStartAddr;
 	u32 PartitionChecksumOffset;
-	u32 Status;
-	PartHeader LocalHeader; // looks redundant - see if can be removed later
-	PartHeader *HeaderPtr = &LocalHeader;
 
-	// get partition's header table offset (relative to ImageBaseAddress)
-	u32 PartitionHeaderOffset;
-	Status = GetPartitionHeaderStartAddr(ImageBaseAddress, &PartitionHeaderOffset);
-	if (Status != XST_SUCCESS) 
-	{
-		fsbl_printf(DEBUG_GENERAL, "Get Header Start Address Failed\r\n");
-		OutputStatus(GET_HEADER_INFO_FAIL);
-		return XST_FAILURE;
-	}
 
-	// Header offset on flash (relative to base of flash memory)
-	PartitionHeaderOffset += ImageBaseAddress;
-
-	// Load Partition Header Information to HeaderPtr
-	Status = LoadSinglePartitionHeaderInfo(PartitionHeaderOffset, HeaderPtr);
-	if (Status != XST_SUCCESS) 
-	{
-		fsbl_printf(DEBUG_GENERAL, "Load Partition Header Info Failed\r\n");
-		OutputStatus(GET_HEADER_INFO_FAIL);
-		return XST_FAILURE;
-	}
-
+	
 	// print partition header information
+	fsbl_printf(DEBUG_INFO, "Chosen Application's Partition Header Information:\r\n");
 	HeaderDump(HeaderPtr);
-
-	// Validate partition header
-	Status = ValidateHeader(HeaderPtr);
-	if (Status != XST_SUCCESS) 
-	{
-		fsbl_printf(DEBUG_GENERAL, "INVALID_HEADER_FAIL\r\n");
-		OutputStatus(INVALID_HEADER_FAIL);
-		return XST_FAILURE;
-	}
 
 	// Load partition header information in to local variables (convert words to bytes)
 	PartitionDataLength = (HeaderPtr->DataWordLen) << WORD_LENGTH_SHIFT; // now in bytes
@@ -571,46 +501,19 @@ u32 LoadApplicationImage(u32 ImageBaseAddress)
 	PartitionStartAddr = (HeaderPtr->PartitionStart) << WORD_LENGTH_SHIFT; // now in bytes
 	PartitionTotalSize = (HeaderPtr->PartitionWordLen) << WORD_LENGTH_SHIFT; // now in bytes
 
-	// check if partition owner is important later - not currently used
+	// since validation already completed, just set flags accordingly
+	PSPartitionFlag = 1;
+	PLPartitionFlag = 0;
+	ApplicationFlag = 1;
+	PartitionChecksumFlag = 1;
 
-	// check if partition is PS image
-	if (PartitionAttr & ATTRIBUTE_PS_IMAGE_MASK)
-	{
-		fsbl_printf(DEBUG_INFO, "Application\r\n");
-		PSPartitionFlag = 1;
-		PLPartitionFlag = 0;
-		ApplicationFlag = 1;
-	}
-	else 
-	{
-		fsbl_printf(DEBUG_INFO, "Application Mask not set in Application Partition, BAD!\r\n");
-		OutputStatus(INVALID_HEADER_FAIL);
-		return XST_FAILURE;
-	}
-
-	//Ensure partition attribute is not set to PL image
-	if (PartitionAttr & ATTRIBUTE_PL_IMAGE_MASK) 
-	{
-		fsbl_printf(DEBUG_INFO, "Bitstream Mask in Application Partition, BAD!\r\n");
-		OutputStatus(INVALID_HEADER_FAIL);
-		return XST_FAILURE;
-	}	
-
-	//**NOTE** will not check for encryption/RSA in images (app or bitstream)
+	// will not check for encryption/RSA in images (app or bitstream)
 	EncryptedPartitionFlag = 0;
 	SignedPartitionFlag = 0;
 
-	// check for partition checksum
-	if (PartitionAttr & ATTRIBUTE_CHECKSUM_TYPE_MASK) 
-	{
-		fsbl_printf(DEBUG_INFO, "Checksum Present\r\n");
-		PartitionChecksumFlag = 1;
-	} 
-	else 
-	{
-		PartitionChecksumFlag = 0;
-	}
 
+	// Continue staging application to DDR Load address for now
+	//TODO: Change to load to BRAM eventually
 
 	/*
 	* Load address check
@@ -761,26 +664,26 @@ u32 ValidateFsblImage(u32 ImageBaseAddress)
 	
 	fsbl_printf(DEBUG_INFO, "FSBL Partition Header Valid\r\n");
 	return XST_SUCCESS;
-
-	// TODO: See if checksum over entire FSBL parition payload is possible
 }
 
-u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootloader)
+u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, PartHeader *HeaderPtr)
 {
-	u32 PartitionDataLength;
-	u32 PartitionImageLength;
-	u32 PartitionTotalSize;
-	u32 PartitionExecAddr;
-	u32 PartitionAttr;
-	u32 PartitionLoadAddr;
-	u32 PartitionStartAddr;
-	u32 PartitionChecksumOffset;
+	// u32 PartitionDataLength;
+	// u32 PartitionImageLength;
+	// u32 PartitionTotalSize;
+	// u32 PartitionExecAddr;
+	// u32 PartitionAttr;
+	// u32 PartitionLoadAddr;
+	// u32 PartitionStartAddr;
+	// u32 PartitionChecksumOffset;
 	u32 Status;
-	PartHeader LocalHeader; // looks redundant - see if can be removed later
-	PartHeader *HeaderPtr = &LocalHeader;
+	u32 PartitionHeaderOffset;
+	u32 PartitionStartAddr;
+	u32 PartitionTotalSize;
+	u32 PartitionChecksumOffset;
 
 	// get partition's header table offset (relative to ImageBaseAddress)
-	u32 PartitionHeaderOffset;
+	
 	Status = GetPartitionHeaderStartAddr(ImageBaseAddress, &PartitionHeaderOffset);
 	if (Status != XST_SUCCESS) 
 	{
@@ -815,21 +718,25 @@ u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootlo
 	
 	// TODO: Only init local variables for what you need, like PartitionAttr, PartitionStartAddr, 
 	// PartitionTotalSize, PartitionChecksumOffset
-
-	// Load partition header information in to local variables (convert words to bytes)
-	PartitionDataLength = (HeaderPtr->DataWordLen) << WORD_LENGTH_SHIFT; // now in bytes
-	PartitionImageLength = (HeaderPtr->ImageWordLen) << WORD_LENGTH_SHIFT; // now in bytes
-	PartitionExecAddr = HeaderPtr->ExecAddr;
-	PartitionAttr = HeaderPtr->PartitionAttr;
-	PartitionLoadAddr = HeaderPtr->LoadAddr;
-	PartitionChecksumOffset = (HeaderPtr->CheckSumOffset) << WORD_LENGTH_SHIFT; // now in bytes
 	PartitionStartAddr = (HeaderPtr->PartitionStart) << WORD_LENGTH_SHIFT; // now in bytes
+	PartitionStartAddr += ImageBaseAddress; // absolute address in flash
+
+	PartitionChecksumOffset = (HeaderPtr->CheckSumOffset) << WORD_LENGTH_SHIFT; // now in bytes
+	PartitionChecksumOffset += ImageBaseAddress; // absolute address in flash
+
 	PartitionTotalSize = (HeaderPtr->PartitionWordLen) << WORD_LENGTH_SHIFT; // now in bytes
+
+	// // Load partition header information in to local variables (convert words to bytes)
+	// PartitionDataLength = (HeaderPtr->DataWordLen) << WORD_LENGTH_SHIFT; // now in bytes
+	// PartitionImageLength = (HeaderPtr->ImageWordLen) << WORD_LENGTH_SHIFT; // now in bytes
+	// PartitionExecAddr = HeaderPtr->ExecAddr;
+	// PartitionAttr = HeaderPtr->PartitionAttr;
+	// PartitionLoadAddr = HeaderPtr->LoadAddr;
 
 	if (IsApplication)
 	{
 		// check if partition is PS image
-		if (PartitionAttr & ATTRIBUTE_PS_IMAGE_MASK)
+		if (HeaderPtr->PartitionAttr & ATTRIBUTE_PS_IMAGE_MASK)
 		{
 			fsbl_printf(DEBUG_INFO, "Application\r\n");
 		}
@@ -843,7 +750,7 @@ u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootlo
 	else
 	{
 		// check if partition is PL image
-		if (PartitionAttr & ATTRIBUTE_PL_IMAGE_MASK) 
+		if (HeaderPtr->PartitionAttr & ATTRIBUTE_PL_IMAGE_MASK) 
 		{
 			fsbl_printf(DEBUG_INFO, "Bitstream\r\n");
 		}
@@ -857,7 +764,7 @@ u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootlo
 
 	// ensure partition has checksum enabled
 	// check for partition checksum
-	if (PartitionAttr & ATTRIBUTE_CHECKSUM_TYPE_MASK) 
+	if (HeaderPtr->PartitionAttr & ATTRIBUTE_CHECKSUM_TYPE_MASK) 
 	{
 		fsbl_printf(DEBUG_INFO, "Checksum Present\r\n");
 		PartitionChecksumFlag = 1;
@@ -871,11 +778,7 @@ u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, u32 isBootlo
 	}
 
 	// validate partition data with checksum
-	/*
-	 * Validate directly from flash: use absolute flash address (boot image base + partition offset)
-	 * so the hash covers the same bytes that were used when the checksum was generated.
-	 */
-	Status = ValidateChecksum(ImageBaseAddress + PartitionStartAddr, PartitionTotalSize, ImageBaseAddress + PartitionChecksumOffset);
+	Status = ValidateChecksum(PartitionStartAddr, PartitionTotalSize, PartitionChecksumOffset);
 	if (Status != XST_SUCCESS) 
 	{
 		fsbl_printf(DEBUG_GENERAL,"PARTITION_CHECKSUM_FAIL\r\n");
