@@ -293,7 +293,10 @@ u32 LoadBootImage(void)
 		
 	}
 
-	fsbl_printf(DEBUG_INFO, "Image Status Word: 0x%08x\r\n", ImageStatus.imageStatusWord);
+	fsbl_printf(DEBUG_INFO, "Image Status Words:\r\n");
+	fsbl_printf(DEBUG_INFO, "FSBL Status Words:0x%02x\r\n", ImageStatus.bytes.fsbl_images);
+	fsbl_printf(DEBUG_INFO, "Bitstream Status Words:0x%02x\r\n", ImageStatus.bytes.bitstream_images);
+	fsbl_printf(DEBUG_INFO, "Application Status Words:0x%02x\r\n", ImageStatus.bytes.app_images);
 
 	// Load Bitstream Image First - only 2 images for now
 	for (PartitionNum = 0; PartitionNum < BITSTREAM_IMAGE_NUMBER; PartitionNum++)
