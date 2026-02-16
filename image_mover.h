@@ -146,14 +146,15 @@ u32 CheckMetaData(XipMetaData *MetaDataInstance); // check metadata struct for c
 //TODO: Pass ImageStartAddress and partition header info to the 
 u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, PartHeader *HeaderPtr); //decouple the validation from final image loading
 																					//always fail an image if not valid or doesn't contain md5 flag or app/bitstream flag
-u32 ValidateFsblImage(u32 ImageAddress); // validate all FBSL boot images, including their bootheaders. 
+u32 ValidateFsblImage(u32 ImageAddress, u8 *FsblChecksum); // validate all FBSL boot images, including their bootheaders. 
 									     // either perform a similar validation structure, checking partition image/header along with bootheader
 										// or check to see if each image is a duplicate of the current image that was picked by BOOTROM (and is in OCM)
 
 u32 CalculateMd5(u32 SourceAddr, u32 DataLength, u8 *Checksum);
 u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset);
-u32 ValidateFsblImageMd5(u32 sourceAddr, u32 FsblStartAddr, u32 FsblLength);
+u32 ValidateFsblImageMd5(u32 sourceAddr, u32 FsblStartAddr, u32 FsblLength, u8 *Checksum);
 u32 CompareChecksums(u8 *Checksum1, u8 *Checksum2);
+u32 FetchFsblChecksum(u8 *Checksum); 
 
 /************************** Variable Definitions *****************************/
 

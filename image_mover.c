@@ -89,6 +89,10 @@
 #define MD5_CHECKSUM_SIZE   16
 
 /************************** User-Defined Constant Definitions *****************************/
+#define FSBL_ADDRESS1 0x8000 // Address in QSPI where FSBL boot image 1 is stored - 32 KiB = 0.25 Mib
+#define FSBL_ADDRESS2 0x00030000 // Address in QSPI where FSBL boot image 2 is stored - 192 KiB = 1.5 Mib
+#define FSBL_ADDRESS3 0x00058000 // Address in QSPI where FSBL boot image 3 is stored - 352 KiB = 2.75 Mib
+
 #define BITSTREAM_ADDRESS1 0x004C0000 // Address in QSPI where bitstream image 1 is stored - 38 Mib
 #define BITSTREAM_ADDRESS2 0x008C0000 // Address in QSPI where bitstream image 2 is stored - 70 Mib
 
@@ -98,13 +102,13 @@
 
 #define APP_IMAGE_NUMBER 3 // Number of application images available
 #define BITSTREAM_IMAGE_NUMBER 2 // Number of bitstream images available
-#define FSBL_IMAGE_NUMBER 2 // Number of FSBL boot images available
+#define FSBL_IMAGE_NUMBER 3 // Number of FSBL boot images available
 
 #define SLOT_MAGIC_NUMBER 0xA1B2C3D4 // Magic number to for XIP metadata struct
 
 // TODO: Adjust addresses to be at bottom of memory at address 0x0 of flash chip (separate by flash subsector size)
-#define SLOT_METADATA_ADDRESS1 0x1000 //Third last 4K sector of 16MB QSPI flash - 127.90625 Mib
-#define SLOT_METADATA_ADDRESS2 0x3000 //Last 4K sector of 16MB QSPI flash - 127.96875 Mib
+#define SLOT_METADATA_ADDRESS1 0x1000 // Second 4 KiB sector of flash memory
+#define SLOT_METADATA_ADDRESS2 0x3000 // Fourth 4 KiB sector of flash memory
 
 #define PAGE_PROGRAM_CMD 0x02 // Page Program command for QSPI flash (equivalent to XQSPIPS_FLASH_OPCODE_PP)
 #define COMMAND_OFFSET 0 // command byte in write buffer of XQspiPs_PolledTransfer
@@ -169,6 +173,7 @@ extern XDcfg *DcfgInstPtr;
 
 
 // add all logic for METADATA here
+// could make fsbl_images into u16 to support up to 16 FSBL boot images
 typedef union 
 {
     u32 imageStatusWord;  // packed 32-bit view
@@ -214,7 +219,10 @@ u32 LoadBootImage(void)
 	u32 FsblImageStartAddress = 0; 
     u32 MultiBootReg = 0;
 
+	u8 FsblChecksum[MD5_CHECKSUM_SIZE];
+
 	//Array of Boot Image Start Addresses
+	u32 FsblStartAddress[] = {FSBL_ADDRESS1, FSBL_ADDRESS2, FSBL_ADDRESS3};
 	u32 BitstreamStartAddress[] = {BITSTREAM_ADDRESS1, BITSTREAM_ADDRESS2};
 	u32 ApplicationStartAddress[] = {APPLICATION_ADDRESS1, APPLICATION_ADDRESS2, APPLICATION_ADDRESS3};
 
@@ -247,11 +255,17 @@ u32 LoadBootImage(void)
 	//TODO: Figure out order of images - if golden image is higher in address space or lower!!!!
 
 	// Validate FSBL Boot Images First
+	Status = FetchFsblChecksum(FsblChecksum); 
+	if (Status != XST_SUCCESS) 
+	{
+		fsbl_printf(DEBUG_GENERAL, "Fetch FSBL Checksum Failed\r\n");
+		return XST_FAILURE; // if FSBL Checksum fetch fails, what should be done???
+	}
 	for (PartitionNum = 0; PartitionNum < FSBL_IMAGE_NUMBER; PartitionNum++)
 	{
 		// NOTE: Currently only validating fsbl at offset 0!!!
-		fsbl_printf(DEBUG_INFO, "Validating FSBL Boot Image %d at address 0x%08x\r\n", PartitionNum + 1, 0);
-		Status = ValidateFsblImage(0); 
+		fsbl_printf(DEBUG_INFO, "Validating FSBL Boot Image %d at address 0x%08x\r\n", PartitionNum + 1, FsblStartAddress[PartitionNum]);
+		Status = ValidateFsblImage(FsblStartAddress[PartitionNum], FsblChecksum); // validate all FBSL boot images (not just partition)
 		if (Status != XST_SUCCESS) 
 		{
 			fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image %d Validation Failed\r\n", PartitionNum + 1);
@@ -588,17 +602,17 @@ u32 LoadApplicationImage(u32 ImageBaseAddress, PartHeader *HeaderPtr)
 	return XST_SUCCESS;
 }
 
-u32 ValidateFsblImage(u32 ImageBaseAddress)
+u32 ValidateFsblImage(u32 ImageBaseAddress, u8 *FsblChecksum)
 {
 	u32 Status;
-	u32 Checksum;
+	u32 BootHeaderChecksum;
 	u32 Count;
 	u32 PartitionHeaderOffset;
 	u32 BootHeaderWords[BOOT_HDR_CHECKSUM_WORD_COUNT + 1]; // +1 for checksum word
 
 	PartHeader LocalHeader; // looks redundant - see if can be removed later
 
-	Checksum = 0;
+	BootHeaderChecksum = 0;
 	PartHeader *HeaderPtr = &LocalHeader;
 
 	Status = MoveImage(ImageBaseAddress + BOOT_HDR_START_OFFSET, BootHeaderWords, (BOOT_HDR_CHECKSUM_WORD_COUNT + 1) << WORD_LENGTH_SHIFT);
@@ -619,19 +633,18 @@ u32 ValidateFsblImage(u32 ImageBaseAddress)
 	// Perform boot header addition checksum validation (from words at offset 0x20 to 0x44(including 0x45-0x47)) - correct inverted checksum at 0x48
 	for (Count = 0; Count < BOOT_HDR_CHECKSUM_WORD_COUNT; Count++) {
 		// Read the word from the header
-		Checksum += BootHeaderWords[Count];
+		BootHeaderChecksum += BootHeaderWords[Count];
 	}
 
 	// Invert checksum, last bit of error checking
-	Checksum ^= 0xFFFFFFFF;
-
+	BootHeaderChecksum ^= 0xFFFFFFFF;
 	/*
 	 * Validate the checksum
 	 */
-	if (BootHeaderWords[BOOT_HDR_CHECKSUM_WORD_COUNT] != Checksum) 
+	if (BootHeaderWords[BOOT_HDR_CHECKSUM_WORD_COUNT] != BootHeaderChecksum) 
 	{
 	    fsbl_printf(DEBUG_GENERAL, "Error: Checksum 0x%8.8lx != 0x%8.8lx\r\n",
-			Checksum, BootHeaderWords[BOOT_HDR_CHECKSUM_WORD_COUNT]);
+			BootHeaderChecksum, BootHeaderWords[BOOT_HDR_CHECKSUM_WORD_COUNT]);
 		return XST_FAILURE;
 	}
 	fsbl_printf(DEBUG_INFO, "FSBL Boot Header Checksum Valid\r\n");
@@ -677,7 +690,7 @@ u32 ValidateFsblImage(u32 ImageBaseAddress)
 	// follow triple modular redundancy to get FSBL checksums
 	fsbl_printf(DEBUG_INFO, "Validate entire Boot Image\r\n");
 	fsbl_printf(DEBUG_INFO, "FSBL Source Offset from boot image: 0x%08x, FSBL Length: 0x%08x\r\n", BootHeaderWords[BOOT_HDR_FSBL_SOURCE_WORD_OFFSET], BootHeaderWords[BOOT_HDR_FSBL_LENGTH_WORD_OFFSET]);
-	Status = ValidateFsblImageMd5(ImageBaseAddress, BootHeaderWords[BOOT_HDR_FSBL_SOURCE_WORD_OFFSET], BootHeaderWords[BOOT_HDR_FSBL_LENGTH_WORD_OFFSET]);
+	Status = ValidateFsblImageMd5(ImageBaseAddress, BootHeaderWords[BOOT_HDR_FSBL_SOURCE_WORD_OFFSET], BootHeaderWords[BOOT_HDR_FSBL_LENGTH_WORD_OFFSET], FsblChecksum);
 	if (Status != XST_SUCCESS) 
 	{
 		fsbl_printf(DEBUG_GENERAL, "FSBL Image MD5 Validation Failed\r\n");
@@ -2192,9 +2205,10 @@ u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset)
 /**
 *
 * This function validates the given FSBL boot image by performing MD5 across entire image 
-* MD5 validated against checksum stored at start of flash (triple modular redundancy)
-* @param	Partition header pointer
-* @param	Partition check sum offset realtive to flash base address
+* MD5 validated against checksum stored at start of flash (decided by triple modular redundancy)
+* @param	sourceAddr Start address of the FSBL boot image in flash
+* @param	FsblStartAddr Start address of the FSBL relative to the sourceAddr
+* @param	FsblLength Length of the FSBL boot image
 * @return
 *		- XST_SUCCESS if FSBL boot image data is ok
 *		- XST_FAILURE if FSBL boot image data is corrupted
@@ -2202,46 +2216,47 @@ u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset)
 * @note		None
 *
 *******************************************************************************/
-u32 ValidateFsblImageMd5(u32 sourceAddr, u32 FsblStartAddr, u32 FsblLength)
+u32 ValidateFsblImageMd5(u32 sourceAddr, u32 FsblStartAddr, u32 FsblLength, u8 *Checksum)
 {
-	u8  Checksum[MD5_CHECKSUM_SIZE];
+	// u8  Checksum[MD5_CHECKSUM_SIZE];
 	u8  CalcChecksum[MD5_CHECKSUM_SIZE];
 	u32 Status;
 	u32 Index;
 	u32 BootImageSize = FsblStartAddr + FsblLength; // total size of an FSBL boot image
 
-	u8 FsblChecksumValues[3][MD5_CHECKSUM_SIZE] = {0};
-	u32 FsblChecksumSlotAddresses[3] = {SLOT_FSBL_MD5_1, SLOT_FSBL_MD5_2, SLOT_FSBL_MD5_3};
+	// u8 FsblChecksumValues[3][MD5_CHECKSUM_SIZE] = {0};
+	// u32 FsblChecksumSlotAddresses[3] = {SLOT_FSBL_MD5_1, SLOT_FSBL_MD5_2, SLOT_FSBL_MD5_3};
 
-	// TODO: Fetch Checksum from Flash
-	for (Index = 0; Index < 3; Index++) 
-	{
-		Status = MoveImage(FsblChecksumSlotAddresses[Index], (u32)&FsblChecksumValues[Index][0], MD5_CHECKSUM_SIZE);
-		if (Status != XST_SUCCESS) 
-		{
-			fsbl_printf(DEBUG_GENERAL, "Move Image failed\r\n");
-			return XST_FAILURE;
-		}
-	}
+	// for (Index = 0; Index < 3; Index++) 
+	// {
+	// 	Status = MoveImage(FsblChecksumSlotAddresses[Index], (u32)&FsblChecksumValues[Index][0], MD5_CHECKSUM_SIZE);
+	// 	if (Status != XST_SUCCESS) 
+	// 	{
+	// 		fsbl_printf(DEBUG_GENERAL, "Move Image failed for slot %d\r\n", Index + 1);
+	// 	}
+	// }
 
-	// Majority voting to determine the correct checksum value
-	if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[1]) == XST_SUCCESS) 
-	{
-		memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
-	} 
-	else if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[2]) == XST_SUCCESS) 
-	{
-		memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
-	} 
-	else if (CompareChecksums(FsblChecksumValues[1], FsblChecksumValues[2]) == XST_SUCCESS) 
-	{
-		memcpy(Checksum, FsblChecksumValues[1], MD5_CHECKSUM_SIZE);
-	} 
-	else 
-	{
-		fsbl_printf(DEBUG_GENERAL, "FSBL Checksum values are inconsistent\r\n");
-		return XST_FAILURE;
-	}
+	// // Majority voting to determine the correct checksum value
+	// if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[1]) == XST_SUCCESS) 
+	// {
+	// 	memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
+	// 	fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+	// } 
+	// else if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[2]) == XST_SUCCESS) 
+	// {
+	// 	memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
+	// 	fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+	// } 
+	// else if (CompareChecksums(FsblChecksumValues[1], FsblChecksumValues[2]) == XST_SUCCESS) 
+	// {
+	// 	memcpy(Checksum, FsblChecksumValues[1], MD5_CHECKSUM_SIZE);
+	// 	fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+	// } 
+	// else 
+	// {
+	// 	fsbl_printf(DEBUG_GENERAL, "FSBL Checksum values are inconsistent\r\n");
+	// 	return XST_FAILURE;
+	// }
 
 
 	// Get MD5 Checksum of FSBL boot image
@@ -2279,4 +2294,82 @@ u32 CompareChecksums(u8 *Checksum1, u8 *Checksum2)
         }
     }
     return XST_SUCCESS;
+}
+
+/******************************************************************************/
+/**
+*
+* This function fetches the 3 checksums stored in flash for validating FSBL boot image
+* Triple modular redundancy used to determine checksum value (best 2 of 3)
+* @param	Checksum Pointer to the fetched checksum of size MD5_CHECKSUM_SIZE
+* @return
+*		- XST_SUCCESS if true checksum exists
+*		- XST_FAILURE if FSBL boot image checksum corrupted
+*
+* @note		None
+*
+*******************************************************************************/
+u32 FetchFsblChecksum(u8 *Checksum)
+{
+//	u8 Checksum[MD5_CHECKSUM_SIZE]; ALLOCATE IN MAIN LOAD BOOT IMAGE FUNCTION
+	u32 Status;
+	u32 Index;
+
+	u8 FsblChecksumValues[3][MD5_CHECKSUM_SIZE] = {0};
+	u32 FsblChecksumSlotAddresses[3] = {SLOT_FSBL_MD5_1, SLOT_FSBL_MD5_2, SLOT_FSBL_MD5_3};
+
+	// fetch the 3 checksum values
+	for (Index = 0; Index < 3; Index++) 
+	{
+		Status = MoveImage(FsblChecksumSlotAddresses[Index], (u32)&FsblChecksumValues[Index][0], MD5_CHECKSUM_SIZE);
+		if (Status != XST_SUCCESS) 
+		{
+			fsbl_printf(DEBUG_GENERAL, "Move Image failed for slot %d\r\n", Index + 1);
+		}
+	}
+
+	// Print fetched checksum values - delete later!!
+	fsbl_printf(DEBUG_INFO, "FSBL Checksum Slot 1:");
+	for (Index = 0 ; Index < MD5_CHECKSUM_SIZE; Index++) 
+	{
+		fsbl_printf(DEBUG_INFO, " 0x%0x ", FsblChecksumValues[0][Index]);
+	}
+	fsbl_printf(DEBUG_INFO, "\r\n");
+	fsbl_printf(DEBUG_INFO, "FSBL Checksum Slot 2:");
+	for (Index = 0 ; Index < MD5_CHECKSUM_SIZE; Index++)
+	{
+		fsbl_printf(DEBUG_INFO, " 0x%0x ", FsblChecksumValues[1][Index]);
+	}
+	fsbl_printf(DEBUG_INFO, "\r\n");
+	fsbl_printf(DEBUG_INFO, "FSBL Checksum Slot 3:");
+	for (Index = 0 ; Index < MD5_CHECKSUM_SIZE; Index++) 
+	{
+		fsbl_printf(DEBUG_INFO, " 0x%0x ", FsblChecksumValues[2][Index]);
+	}
+	fsbl_printf(DEBUG_INFO, "\r\n");
+
+
+	// Majority voting to determine the correct checksum value
+	if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[1]) == XST_SUCCESS) 
+	{
+		memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
+		fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+	} 
+	else if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[2]) == XST_SUCCESS) 
+	{
+		memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
+		fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+	} 
+	else if (CompareChecksums(FsblChecksumValues[1], FsblChecksumValues[2]) == XST_SUCCESS) 
+	{
+		memcpy(Checksum, FsblChecksumValues[1], MD5_CHECKSUM_SIZE);
+		fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+	} 
+	else 
+	{
+		fsbl_printf(DEBUG_GENERAL, "FSBL Checksum values are inconsistent\r\n");
+		return XST_FAILURE;
+	}
+
+	return XST_SUCCESS;
 }
