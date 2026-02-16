@@ -2224,41 +2224,6 @@ u32 ValidateFsblImageMd5(u32 sourceAddr, u32 FsblStartAddr, u32 FsblLength, u8 *
 	u32 Index;
 	u32 BootImageSize = FsblStartAddr + FsblLength; // total size of an FSBL boot image
 
-	// u8 FsblChecksumValues[3][MD5_CHECKSUM_SIZE] = {0};
-	// u32 FsblChecksumSlotAddresses[3] = {SLOT_FSBL_MD5_1, SLOT_FSBL_MD5_2, SLOT_FSBL_MD5_3};
-
-	// for (Index = 0; Index < 3; Index++) 
-	// {
-	// 	Status = MoveImage(FsblChecksumSlotAddresses[Index], (u32)&FsblChecksumValues[Index][0], MD5_CHECKSUM_SIZE);
-	// 	if (Status != XST_SUCCESS) 
-	// 	{
-	// 		fsbl_printf(DEBUG_GENERAL, "Move Image failed for slot %d\r\n", Index + 1);
-	// 	}
-	// }
-
-	// // Majority voting to determine the correct checksum value
-	// if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[1]) == XST_SUCCESS) 
-	// {
-	// 	memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
-	// 	fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
-	// } 
-	// else if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[2]) == XST_SUCCESS) 
-	// {
-	// 	memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
-	// 	fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
-	// } 
-	// else if (CompareChecksums(FsblChecksumValues[1], FsblChecksumValues[2]) == XST_SUCCESS) 
-	// {
-	// 	memcpy(Checksum, FsblChecksumValues[1], MD5_CHECKSUM_SIZE);
-	// 	fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
-	// } 
-	// else 
-	// {
-	// 	fsbl_printf(DEBUG_GENERAL, "FSBL Checksum values are inconsistent\r\n");
-	// 	return XST_FAILURE;
-	// }
-
-
 	// Get MD5 Checksum of FSBL boot image
 	Status = CalculateMd5(sourceAddr, BootImageSize, &CalcChecksum[0]);
 	if(Status != XST_SUCCESS) 
@@ -2358,12 +2323,12 @@ u32 FetchFsblChecksum(u8 *Checksum)
 	else if (CompareChecksums(FsblChecksumValues[0], FsblChecksumValues[2]) == XST_SUCCESS) 
 	{
 		memcpy(Checksum, FsblChecksumValues[0], MD5_CHECKSUM_SIZE);
-		fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+		fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 3 are consistent\r\n");
 	} 
 	else if (CompareChecksums(FsblChecksumValues[1], FsblChecksumValues[2]) == XST_SUCCESS) 
 	{
 		memcpy(Checksum, FsblChecksumValues[1], MD5_CHECKSUM_SIZE);
-		fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 1 and slot 2 are consistent\r\n");
+		fsbl_printf(DEBUG_INFO, "FSBL Checksum values from slot 2 and slot 3 are consistent\r\n");
 	} 
 	else 
 	{
