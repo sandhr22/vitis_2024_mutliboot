@@ -132,6 +132,20 @@
 
 /**************************** Type Definitions *******************************/
 
+// add all logic for METADATA here
+// could make fsbl_images into u16 to support up to 16 FSBL boot images
+typedef union 
+{
+    u32 imageStatusWord;  // packed 32-bit view
+    struct 
+	{
+        u8 fsbl_images;      // byte 0 (LSB)
+		u8 bitstream_images; // byte 1
+        u8 app_images;       // byte 2
+        u8 reserved;         // byte 3
+    } bytes;
+} ImageStatusTable;
+
 /***************** Macros (Inline Functions) Definitions *********************/
 
 /************************** Function Prototypes ******************************/
@@ -313,21 +327,6 @@ u32 UpdateMetaData(XipMetaData *MetaDataInstance)
 
     return Status;
 }
-
-// add all logic for METADATA here
-// could make fsbl_images into u16 to support up to 16 FSBL boot images
-typedef union 
-{
-    u32 imageStatusWord;  // packed 32-bit view
-    struct 
-	{
-        u8 fsbl_images;      // byte 0 (LSB)
-		u8 bitstream_images; // byte 1
-        u8 app_images;       // byte 2
-        u8 reserved;         // byte 3
-    } bytes;
-} ImageStatusTable;
-
 
 /*
 TODO: 
