@@ -112,6 +112,31 @@ typedef struct {
 	u8 MD5CheckSum[16];	// MD5_CHECKSUM_SIZE
 } XipMetaData;
 
+// could make fsbl_images into u16 to support up to 16 FSBL boot images
+typedef union 
+{
+    u32 imageStatusWord;  // packed 32-bit view
+    struct 
+	{
+        u8 fsbl_images;      // byte 0 (LSB)
+		u8 bitstream_images; // byte 1
+        u8 app_images;       // byte 2
+        u8 reserved;         // byte 3
+    } bytes;
+} ImageStatusTable;
+
+// could make fsbl_images into u16 to support up to 16 FSBL boot images
+typedef union 
+{
+    u32 activeAppWord;  // packed 32-bit view
+    struct 
+	{
+        u8 fsbl_images;      // byte 0 (LSB)
+		u8 bitstream_images; // byte 1
+        u8 app_images;       // byte 2
+        u8 reserved;         // byte 3
+    } bytes;
+} ActiveAppTable;
 
 /***************** Macros (Inline Functions) Definitions *********************/
 #define MoverIn32		Xil_In32
@@ -143,12 +168,8 @@ u32 WriteXipMetadata(u32 Address, XipMetaData *MetaDataInstance);
 u32 UpdateMetaData(XipMetaData *MetaDataInstance); // first complete checksum with new fields and then update both metadata locations
 u32 CheckMetaData(XipMetaData *MetaDataInstance); // check metadata struct for correct checksum and magic number
 
-//TODO: Pass ImageStartAddress and partition header info to the 
-u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, PartHeader *HeaderPtr); //decouple the validation from final image loading
-																					//always fail an image if not valid or doesn't contain md5 flag or app/bitstream flag
-u32 ValidateFsblImage(u32 ImageAddress, u8 *FsblChecksum); // validate all FBSL boot images, including their bootheaders. 
-									     // either perform a similar validation structure, checking partition image/header along with bootheader
-										// or check to see if each image is a duplicate of the current image that was picked by BOOTROM (and is in OCM)
+u32 ValidatePartitionImage(u32 ImageBaseAddress, u32 IsApplication, PartHeader *HeaderPtr); 
+u32 ValidateFsblImage(u32 ImageAddress, u8 *FsblChecksum); 
 
 u32 CalculateMd5(u32 SourceAddr, u32 DataLength, u8 *Checksum);
 u32 ValidateChecksum(u32 sourceAddr, u32 DataLength, u32 ChecksumOffset);
