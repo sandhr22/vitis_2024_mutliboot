@@ -132,20 +132,6 @@
 
 /**************************** Type Definitions *******************************/
 
-// add all logic for METADATA here
-// could make fsbl_images into u16 to support up to 16 FSBL boot images
-typedef union 
-{
-    u32 imageStatusWord;  // packed 32-bit view
-    struct 
-	{
-        u8 fsbl_images;      // byte 0 (LSB)
-		u8 bitstream_images; // byte 1
-        u8 app_images;       // byte 2
-        u8 reserved;         // byte 3
-    } bytes;
-} ImageStatusTable;
-
 /***************** Macros (Inline Functions) Definitions *********************/
 
 /************************** Function Prototypes ******************************/
@@ -214,7 +200,7 @@ u32 WriteXipMetadata(u32 Address, XipMetaData *MetaDataInstance)
     memcpy(&WriteBuffer[WRITE_BUFFER_DATA_OFFSET], MetaDataInstance, sizeof(XipMetaData));
 
 	//Call function for write enable + page write (send address, data, and write buffer size 4 + sizeof(XipMetaData))
-	Status = WritePage(WriteBuffer, 32);
+	Status = WritePage(WriteBuffer, 4 + sizeof(XipMetaData));
 	if (Status != XST_SUCCESS)
 	{
 		fsbl_printf(DEBUG_GENERAL, "Failed to write XIP meta data to 0x%08X\r\n", Address);
@@ -316,7 +302,7 @@ u32 UpdateMetaData(XipMetaData *MetaDataInstance)
 	if (Status != XST_SUCCESS) 
 	{
 	    fsbl_printf(DEBUG_GENERAL, "Failed to write Metadata Slot 2 at 0x%08X, will try again\r\n", SLOT_METADATA_ADDRESS2);
-	    // return XST_FAILURE;
+	    // return XST_FAILURE;  
 		Status = WriteXipMetadata(SLOT_METADATA_ADDRESS2, MetaDataInstance);
 		if (Status != XST_SUCCESS) 
 		{
@@ -327,6 +313,8 @@ u32 UpdateMetaData(XipMetaData *MetaDataInstance)
 
     return Status;
 }
+
+// TODO: IF current boot image is NOT passing, then change multiboot reg and have it reboot 
 
 /*
 TODO: 
@@ -371,6 +359,9 @@ u32 LoadBootImage(void)
 	PartHeader ApplicationHeaders[APP_IMAGE_NUMBER];
 
 	ImageStatusTable ImageStatus = {0};
+	ActiveAppTable ActiveApp = {0};
+
+	XipMetaData MetaDataInstanceRead, MetaDataInstanceWrite;
 
 	// Resetting the Flags for which partition type is loaded
 	BitstreamFlag = 0;
@@ -393,6 +384,7 @@ u32 LoadBootImage(void)
 		fsbl_printf(DEBUG_GENERAL, "QspiSetIOMode Failed\r\n");
 	}
 
+	//TODO: fetch metadata from flash to check which images are active.
 	//TODO: Figure out order of images - if golden image is higher in address space or lower!!!!
 
 	// Validate FSBL Boot Images First
@@ -404,7 +396,6 @@ u32 LoadBootImage(void)
 	}
 	for (PartitionNum = 0; PartitionNum < FSBL_IMAGE_NUMBER; PartitionNum++)
 	{
-		// NOTE: Currently only validating fsbl at offset 0!!!
 		fsbl_printf(DEBUG_INFO, "Validating FSBL Boot Image %d at address 0x%08x\r\n", PartitionNum + 1, FsblStartAddress[PartitionNum]);
 		Status = ValidateFsblImage(FsblStartAddress[PartitionNum], FsblChecksum); // validate all FBSL boot images (not just partition)
 		if (Status != XST_SUCCESS) 
@@ -415,7 +406,15 @@ u32 LoadBootImage(void)
 		{
 			fsbl_printf(DEBUG_GENERAL, "FSBL Boot Image %d Validation Successful\r\n", PartitionNum + 1);
 			ImageStatus.bytes.fsbl_images |= (1U << PartitionNum); 
-		}	
+		}
+
+		// Set Bit to indicate currently active FSBL boot image
+		if (FsblStartAddress[PartitionNum] == FsblImageStartAddress)
+		{
+			ActiveApp.bytes.fsbl_images = (1U << PartitionNum);
+
+			//TODO: If current FSBL image is not valid, then reboot and try next FSBL image
+		}
 	}
 
 	// Validate Bitstreams
@@ -454,7 +453,7 @@ u32 LoadBootImage(void)
 		
 	}
 
-	fsbl_printf(DEBUG_INFO, "Image Status Words:\r\n");
+	fsbl_printf(DEBUG_INFO, "Image Status Word (Total): 0x%08x\r\n", ImageStatus.imageStatusWord);
 	fsbl_printf(DEBUG_INFO, "FSBL Status Words:0x%02x\r\n", ImageStatus.bytes.fsbl_images);
 	fsbl_printf(DEBUG_INFO, "Bitstream Status Words:0x%02x\r\n", ImageStatus.bytes.bitstream_images);
 	fsbl_printf(DEBUG_INFO, "Application Status Words:0x%02x\r\n", ImageStatus.bytes.app_images);
@@ -479,6 +478,7 @@ u32 LoadBootImage(void)
 			else
 			{
 				fsbl_printf(DEBUG_GENERAL, "Bitstream Image %d Load Successful\r\n", PartitionNum + 1);
+				ActiveApp.bytes.bitstream_images = (1U << PartitionNum); // Set active bitstream image
 				break; // Exit for loop if bitstream loaded successfully
 			}
 		}
@@ -520,6 +520,7 @@ u32 LoadBootImage(void)
 			else
 			{
 				fsbl_printf(DEBUG_GENERAL, "Application Image %d Load Successful\r\n", PartitionNum + 1);
+				ActiveApp.bytes.app_images = (1U << PartitionNum); // Set active application image
 				break; // Exit for loop if application loaded successfully
 			}
 		}
@@ -537,6 +538,27 @@ u32 LoadBootImage(void)
 		FsblFallback(); // will require fallback in this case
 		// NOTHING CAN BE DONE IF APPLICATION DOES NOT LOAD
 	}
+
+	fsbl_printf(DEBUG_INFO, "Active Image Word: 0x%08x\r\n", ActiveApp.activeAppWord);
+	fsbl_printf(DEBUG_INFO, "Saving Image Status and Active App Information to Metadata in Flash\r\n");
+	// Update Metadata in flash with new image status and active app information
+	MetaDataInstanceWrite.MagicNumber = SLOT_MAGIC_NUMBER;
+	MetaDataInstanceWrite.ImageStatus = ImageStatus.imageStatusWord;
+	MetaDataInstanceWrite.ActiveApp = ActiveApp.activeAppWord;
+	Status = UpdateMetaData(&MetaDataInstanceWrite);
+
+	// Header and Checksum are validated before returning from UpdateMetaData(), so delete this later.
+	MoveImage(SLOT_METADATA_ADDRESS1, (u32)&MetaDataInstanceRead, sizeof(XipMetaData));
+	fsbl_printf(DEBUG_INFO, "Read back Metadata Slot 1 from flash after update:\r\n");
+	fsbl_printf(DEBUG_INFO, "Magic Number: 0x%08X\r\n", MetaDataInstanceRead.MagicNumber);
+	fsbl_printf(DEBUG_INFO, "Image Status Word: 0x%08X\r\n", MetaDataInstanceRead.ImageStatus);
+	fsbl_printf(DEBUG_INFO, "Active App Word: 0x%08X\r\n", MetaDataInstanceRead.ActiveApp);
+
+	MoveImage(SLOT_METADATA_ADDRESS2, (u32)&MetaDataInstanceRead, sizeof(XipMetaData));
+	fsbl_printf(DEBUG_INFO, "Read back Metadata Slot 2 from flash after update:\r\n");
+	fsbl_printf(DEBUG_INFO, "Magic Number: 0x%08X\r\n", MetaDataInstanceRead.MagicNumber);
+	fsbl_printf(DEBUG_INFO, "Image Status Word: 0x%08X\r\n", MetaDataInstanceRead.ImageStatus);
+	fsbl_printf(DEBUG_INFO, "Active App Word: 0x%08X\r\n", MetaDataInstanceRead.ActiveApp);
 
     fsbl_printf(DEBUG_INFO, "Returning execution address 0x%08x\r\n", ExecutionAddress);
 	return (ExecutionAddress);
