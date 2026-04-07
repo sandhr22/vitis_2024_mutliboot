@@ -370,7 +370,8 @@ extern "C" {
 #define PARTITION_CHECKSUM_FAIL		0xA010 /**< Partition checksum fail */
 #define RSA_SUPPORT_NOT_ENABLED_FAIL	0xA011 /**< RSA not enabled fail */
 #define PS7_INIT_FAIL			0xA012 /**< ps7 Init Fail */
-#define PARTITION_LOAD_FAIL            0xA013 /**< Partition load fail*/
+#define PARTITION_LOAD_FAIL     0xA013 /**< Partition load fail*/
+#define PARTITION_STREAM_FAIL	0xA014 /**< Partition stream fail */
 /*
  * FSBL Exception error codes
  */
@@ -521,9 +522,6 @@ extern "C" {
 
 /* The address that holds the base address for the image Boot ROM found */
 #define BASEADDR_HOLDER		0xFFFFFFF8
-
-/* Alias to XPAR_PS7_QSPI_LINEAR_0_BASEADDRESS in xparameters.h */
-#define XPAR_PS7_QSPI_LINEAR_0_BASEADDR XPAR_PS7_QSPI_LINEAR_0_BASEADDRESS
 
 /**************************** Type Definitions *******************************/
 

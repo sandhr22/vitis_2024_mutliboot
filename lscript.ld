@@ -292,7 +292,7 @@ _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
    . += _UNDEF_STACK_SIZE;
    . = ALIGN(16);
    __undef_stack = .;
-} > ps7_ram_1_S_AXI_BASEADDR
+} > ps7_ram_0_S_AXI_BASEADDR
 
 _end = .;
 }

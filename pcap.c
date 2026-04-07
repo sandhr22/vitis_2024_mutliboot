@@ -71,7 +71,6 @@
 /***************************** Include Files *********************************/
 
 #include "pcap.h"
-#include "nand.h"		/* For NAND geometry information */
 #include "fsbl.h"
 #include "image_mover.h"	/* For MoveImage */
 #include "xparameters.h"
@@ -360,6 +359,336 @@ u32 PcapLoadPartition(u32 *SourceDataPtr, u32 *DestinationDataPtr,
 
 	return XST_SUCCESS;
 }
+
+/******************************************************************************/
+/**
+*
+* This function transfers one chunk of a bitstream to the PCAP for streaming
+* configuration of the PL. Call FabricInit() once before the first chunk.
+* For all intermediate chunks pass IsLastChunk = 0. For the final chunk pass
+* IsLastChunk = 1, which sets PCAP_LAST_TRANSFER and waits for FPGA done.
+*
+* @param	DataPtr      Pointer to word-aligned source data in OCM
+* @param	WordLen      Number of 32-bit words in this chunk
+* @param	IsLastChunk  1 if this is the final chunk, 0 otherwise
+*
+* @return
+*		- XST_SUCCESS if the transfer is successful
+*		- XST_FAILURE if the transfer fails
+*
+* @note		None
+*
+****************************************************************************/
+u32 PcapBitstreamChunk(u32 *DataPtr, u32 WordLen, u32 IsLastChunk)
+{
+	u32 Status;
+	u32 IntrStsReg;
+	u32 SrcPtr = (u32)DataPtr;
+	u32 DstPtr;
+	static u32 ChunkCount = 0U;
+
+	/*
+	 * Do NOT call ClearPcapStatus() here.  Calling XDcfg_IntrClear(0xFFFFFFFF)
+	 * between 988 consecutive non-last DMA transfers clears status bits that the
+	 * PCAP write pipeline uses internally to track the FIFO drain / CCLK-gate
+	 * handshake.  Doing so between chunks corrupts the SelectMAP data stream
+	 * seen by the FPGA, causing CRC failure at the Write_CRC command in the last
+	 * chunk.  ClearPcapStatus() is called once in PartitionStream() after
+	 * FabricInit() to establish a clean starting state; it must not be called
+	 * again until the entire bitstream has been delivered.
+	 *
+	 * XDcfg_Transfer() already performs the necessary per-transfer checks:
+	 *   - XDcfg_IsDmaBusy(): rejects a new command if the 2-entry queue is full
+	 *   - PCFG_INIT (STATUS bit 4): aborts if INIT_B is low (FPGA config error)
+	 * Both are sufficient to detect error conditions without the ISR clear.
+	 */
+
+#ifdef XPAR_XWDTPS_0_BASEADDR
+	XWdtPs_RestartWdt(&Watchdog);
+#endif
+
+	/*
+	 * The destination for a PCAP write is always XDCFG_DMA_INVALID_ADDRESS
+	 * (0xFFFFFFFF). This is the hardware magic value that routes DMA writes
+	 * to the PCAP write FIFO rather than to system memory. It is NOT a
+	 * last-transfer flag — that signal is carried by bit 0 of SrcPtr only.
+	 * Using any other value (e.g. 0xFFFFFFFE) causes the PCAP DMA to treat
+	 * it as a real AXI destination address, which hangs the bus.
+	 */
+	DstPtr = XDCFG_DMA_INVALID_ADDRESS;
+
+	/*
+	 * Bit 0 of SrcPtr is the PCAP_LAST_TRANSFER flag (per Zynq TRM and the
+	 * behaviour of PcapLoadPartition). The hardware uses SrcPtr[31:2] as the
+	 * source address and SrcPtr[0] as the end-of-configuration signal to the
+	 * FPGA. Set it only on the final chunk.
+	 */
+	if (IsLastChunk) {
+		SrcPtr |= PCAP_LAST_TRANSFER;
+	}
+
+	/*
+	 * Kick off DMA transfer to PCAP (FPGA configuration write)
+	 */
+	Status = XDcfg_Transfer(DcfgInstPtr,
+				(u8 *)SrcPtr, WordLen,
+				(u8 *)DstPtr, WordLen,
+				XDCFG_NON_SECURE_PCAP_WRITE);
+	if (Status != XST_SUCCESS) {
+		fsbl_printf(DEBUG_INFO, "PcapBitstreamChunk: XDcfg_Transfer = %u\r\n", Status);
+		return XST_FAILURE;
+	}
+
+	/*
+	 * Wait for DMA done (required before reusing the chunk buffer)
+	 */
+	Status = XDcfgPollDone(XDCFG_IXR_DMA_DONE_MASK, MAX_COUNT);
+	if (Status != XST_SUCCESS) {
+		fsbl_printf(DEBUG_INFO, "PcapBitstreamChunk: PCAP_DMA_DONE_FAIL\r\n");
+		return XST_FAILURE;
+	}
+
+	/*
+	 * Check for PCAP errors after every chunk.
+	 * Also check PCFG_INIT_NE (bit 0): INIT_B went low = FPGA CRC error.
+	 * Print ISR periodically (every 100 chunks) for diagnostics even when
+	 * there is no error, so that unexpected ISR bits can be spotted in the
+	 * log without adding 988 individual print lines.
+	 */
+	ChunkCount++;
+	IntrStsReg = XDcfg_IntrGetStatus(DcfgInstPtr);
+	if ((ChunkCount % 100U) == 0U) {
+		fsbl_printf(DEBUG_INFO,
+			"PcapBitstreamChunk[%u]: DMA_DONE ISR=0x%x\r\n",
+			ChunkCount, IntrStsReg);
+	}
+	if (IntrStsReg & FSBL_XDCFG_IXR_ERROR_FLAGS_MASK) {
+		fsbl_printf(DEBUG_INFO,
+			"PcapBitstreamChunk[%u]: PCAP error ISR=0x%x\r\n",
+			ChunkCount, IntrStsReg);
+		ChunkCount = 0U;
+		return XST_FAILURE;
+	}
+	if (IntrStsReg & XDCFG_IXR_PCFG_INIT_NE_MASK) {
+		fsbl_printf(DEBUG_INFO,
+			"PcapBitstreamChunk[%u]: INIT_B low (CRC error) ISR=0x%x\r\n",
+			ChunkCount, IntrStsReg);
+		ChunkCount = 0U;
+		return XST_FAILURE;
+	}
+
+	/*
+	 * On the last chunk, dump the PCAP state before polling for FPGA done
+	 * so we can diagnose cases where PCFG_DONE never asserts.
+	 * Use a finite timeout (10 million APB reads ≈ a few seconds) so the
+	 * register dump is not delayed by the billion-count default.
+	 */
+	if (IsLastChunk) {
+		fsbl_printf(DEBUG_INFO,
+			"PcapBitstreamChunk: last chunk DMA done, ISR=0x%x, waiting for FPGA done\r\n",
+			IntrStsReg);
+		PcapDumpRegisters();
+
+		Status = XDcfgPollDone(XDCFG_IXR_PCFG_DONE_MASK, 10000000U);
+		if (Status != XST_SUCCESS) {
+			IntrStsReg = XDcfg_IntrGetStatus(DcfgInstPtr);
+			fsbl_printf(DEBUG_INFO,
+				"PcapBitstreamChunk: PCAP_FPGA_DONE_FAIL ISR=0x%x STATUS=0x%x\r\n",
+				IntrStsReg,
+				XDcfg_GetStatusRegister(DcfgInstPtr));
+			PcapDumpRegisters();
+			return XST_FAILURE;
+		}
+
+		fsbl_printf(DEBUG_INFO, "FPGA Done!\r\n");
+
+		IntrStsReg = XDcfg_IntrGetStatus(DcfgInstPtr);
+		if (IntrStsReg & FSBL_XDCFG_IXR_ERROR_FLAGS_MASK) {
+			fsbl_printf(DEBUG_INFO,
+				"PcapBitstreamChunk: Errors after FPGA done, ISR=0x%x\r\n",
+				IntrStsReg);
+			ChunkCount = 0U;
+			return XST_FAILURE;
+		}
+		ChunkCount = 0U;
+	}
+
+	return XST_SUCCESS;
+}
+
+/******************************************************************************/
+/**
+*
+* Kick off one chunk DMA transfer to the PCAP without waiting for completion.
+* Call PcapBitstreamChunkWait() after reading the next chunk into the other
+* ping-pong buffer to overlap QSPI read latency with DMA transfer time.
+*
+* FabricInit() and ClearPcapStatus() must have been called once before the
+* first chunk.
+*
+* @param	DataPtr      Word-aligned pointer to source data in OCM
+* @param	WordLen      Number of 32-bit words in this chunk
+* @param	IsLastChunk  1 if this is the final chunk, 0 otherwise
+*
+* @return XST_SUCCESS or XST_FAILURE
+*
+****************************************************************************/
+u32 PcapBitstreamChunkStart(u32 *DataPtr, u32 WordLen, u32 IsLastChunk)
+{
+	u32 SrcPtr = (u32)DataPtr;
+	u32 CtrlReg;
+
+	if (IsLastChunk) {
+		SrcPtr |= PCAP_LAST_TRANSFER;
+	}
+
+	/*
+	 * Pre-flight checks — mirrors XDcfg_Transfer's NON_SECURE_PCAP_WRITE path.
+	 */
+	if (XDcfg_IsDmaBusy(DcfgInstPtr) == XST_SUCCESS) {
+		fsbl_printf(DEBUG_INFO, "PcapBitstreamChunkStart: DMA queue full\r\n");
+		return XST_FAILURE;
+	}
+	if ((XDcfg_ReadReg(DcfgInstPtr->Config.BaseAddr, XDCFG_STATUS_OFFSET)
+			& XDCFG_STATUS_PCFG_INIT_MASK) == 0) {
+		fsbl_printf(DEBUG_INFO, "PcapBitstreamChunkStart: PCFG_INIT low\r\n");
+		return XST_FAILURE;
+	}
+
+	/* Clear PCAP loopback */
+	CtrlReg = XDcfg_ReadReg(DcfgInstPtr->Config.BaseAddr, XDCFG_MCTRL_OFFSET);
+	XDcfg_WriteReg(DcfgInstPtr->Config.BaseAddr, XDCFG_MCTRL_OFFSET,
+				   CtrlReg & ~XDCFG_MCTRL_PCAP_LPBK_MASK);
+
+	/* Clear PCAP_RATE_EN so data is sent every PCAP clock */
+	CtrlReg = XDcfg_ReadReg(DcfgInstPtr->Config.BaseAddr, XDCFG_CTRL_OFFSET);
+	XDcfg_WriteReg(DcfgInstPtr->Config.BaseAddr, XDCFG_CTRL_OFFSET,
+				   CtrlReg & ~XDCFG_CTRL_PCAP_RATE_EN_MASK);
+
+	/*
+	 * Initiate DMA.
+	 * DST_LEN must be 0 for PS->PL (PCAP write) transfers per UG585 TRM.
+	 * XDcfg_Transfer incorrectly passes the caller's DestWordLength unchanged,
+	 * which causes the DMA engine to attempt a PCAP readback on the last chunk
+	 * (when PCAP_LAST_TRANSFER is active), corrupting the bitstream tail.
+	 */
+	XDcfg_InitiateDma(DcfgInstPtr,
+					  SrcPtr,
+					  XDCFG_DMA_INVALID_ADDRESS,
+					  WordLen,
+					  0U);
+	return XST_SUCCESS;
+}
+
+/******************************************************************************/
+/**
+*
+* Wait for the DMA started by PcapBitstreamChunkStart() to complete.
+* Uses a tight polling loop (no UART newline) so the window between DMA done
+* and the next PcapBitstreamChunkStart() is minimised to a few APB cycles,
+* preventing the PCAP write FIFO from emptying between back-to-back chunks.
+*
+* For the last chunk (IsLastChunk == 1) also polls for FPGA configuration
+* done (PCFG_DONE) and checks error flags.
+*
+* @param	IsLastChunk  1 if the chunk just started was the final chunk
+* @param	ChunkCount   1-based chunk number, for diagnostic prints
+*
+* @return XST_SUCCESS or XST_FAILURE
+*
+****************************************************************************/
+u32 PcapBitstreamChunkWait(u32 IsLastChunk, u32 ChunkCount)
+{
+	u32 Count = MAX_COUNT;
+	u32 IntrStsReg;
+	u32 Status;
+
+	/*
+	 * Poll D_P_DONE (bit 12) OR DMA_DONE (bit 13).
+	 * D_P_DONE = "DMA AXI burst AND PCAP internal write FIFO both drained".
+	 * For a single large transfer this ensures the CRC word has been fully
+	 * consumed by the PCAP pipeline before we poll PCFG_DONE. Accept either
+	 * bit so that the poll succeeds regardless of which fires first.
+	 */
+	do {
+		IntrStsReg = XDcfg_IntrGetStatus(DcfgInstPtr);
+		if (IntrStsReg & (XDCFG_IXR_D_P_DONE_MASK | XDCFG_IXR_DMA_DONE_MASK)) {
+			XDcfg_IntrClear(DcfgInstPtr,
+				XDCFG_IXR_D_P_DONE_MASK | XDCFG_IXR_DMA_DONE_MASK);
+			break;
+		}
+		if (IntrStsReg & FSBL_XDCFG_IXR_ERROR_FLAGS_MASK) {
+			fsbl_printf(DEBUG_INFO,
+				"PcapBitstreamChunkWait[%u]: PCAP error ISR=0x%x\r\n",
+				ChunkCount, IntrStsReg);
+			return XST_FAILURE;
+		}
+		if (--Count == 0U) {
+			fsbl_printf(DEBUG_GENERAL,
+				"PcapBitstreamChunkWait[%u]: D_P_DONE timeout\r\n",
+				ChunkCount);
+			return XST_FAILURE;
+		}
+	} while (1);
+
+	/* Acknowledge DMA_DONE_CNT in STATUS register (write-to-clear).
+	 * CR#846899: must clear after each transfer to prevent saturation.
+	 * Also captures TX_FIFO_LVL for periodic diagnostics. */
+	{
+		u32 StatusReg = XDcfg_GetStatusRegister(DcfgInstPtr);
+		if (StatusReg & XDCFG_STATUS_DMA_DONE_CNT_MASK) {
+			XDcfg_SetStatusRegister(DcfgInstPtr,
+					StatusReg | XDCFG_STATUS_DMA_DONE_CNT_MASK);
+		}
+		if ((ChunkCount % 100U) == 0U) {
+			fsbl_printf(DEBUG_INFO,
+				"PcapBitstreamChunkWait[%u]: ISR=0x%x STATUS=0x%x"
+				" (DMA_CNT=%u TX_FIFO=%u)\r\n",
+				ChunkCount, IntrStsReg, StatusReg,
+				(unsigned int)((StatusReg & XDCFG_STATUS_DMA_DONE_CNT_MASK) >> 28),
+				(unsigned int)((StatusReg & XDCFG_STATUS_TX_FIFO_LVL_MASK) >> 12));
+		}
+	}
+
+	if (IntrStsReg & XDCFG_IXR_PCFG_INIT_NE_MASK) {
+		fsbl_printf(DEBUG_INFO,
+			"PcapBitstreamChunkWait[%u]: INIT_B low (CRC error) ISR=0x%x\r\n",
+			ChunkCount, IntrStsReg);
+		return XST_FAILURE;
+	}
+
+	if (IsLastChunk) {
+		fsbl_printf(DEBUG_INFO,
+			"PcapBitstreamChunkWait[%u]: last chunk DMA done ISR=0x%x,"
+			" waiting FPGA done\r\n", ChunkCount, IntrStsReg);
+		PcapDumpRegisters();
+
+		Status = XDcfgPollDone(XDCFG_IXR_PCFG_DONE_MASK, 10000000U);
+		if (Status != XST_SUCCESS) {
+			IntrStsReg = XDcfg_IntrGetStatus(DcfgInstPtr);
+			fsbl_printf(DEBUG_INFO,
+				"PcapBitstreamChunkWait[%u]: PCAP_FPGA_DONE_FAIL"
+				" ISR=0x%x STATUS=0x%x\r\n",
+				ChunkCount, IntrStsReg,
+				XDcfg_GetStatusRegister(DcfgInstPtr));
+			PcapDumpRegisters();
+			return XST_FAILURE;
+		}
+
+		fsbl_printf(DEBUG_INFO, "FPGA Done!\r\n");
+
+		IntrStsReg = XDcfg_IntrGetStatus(DcfgInstPtr);
+		if (IntrStsReg & FSBL_XDCFG_IXR_ERROR_FLAGS_MASK) {
+			fsbl_printf(DEBUG_INFO,
+				"PcapBitstreamChunkWait: errors after FPGA done"
+				" ISR=0x%x\r\n", IntrStsReg);
+			return XST_FAILURE;
+		}
+	}
+
+	return XST_SUCCESS;
+}
+
 
 /******************************************************************************/
 /**

@@ -107,9 +107,6 @@
 
 #include "fsbl.h"
 #include "qspi.h"
-#include "nand.h"
-#include "nor.h"
-#include "sd.h"
 #include "pcap.h"
 #include "image_mover.h"
 #include "xparameters.h"
@@ -151,6 +148,10 @@
 	#define WDT_CRV_SHIFT		12
 #endif
 
+#ifndef XPAR_PS7_QSPI_LINEAR_0_BASEADDR
+    #define XPAR_PS7_QSPI_LINEAR_0_BASEADDR XPAR_PS7_QSPI_LINEAR_0_BASEADDRESS
+#endif
+
 /**************************** Type Definitions *******************************/
 
 /***************** Macros (Inline Functions) Definitions *********************/
@@ -183,8 +184,6 @@ void  CheckWDTReset(void);
 #endif
 
 u32 NextValidImageCheck(void);
-
-u32 DDRInitCheck(void);
 
 /************************** Variable Definitions *****************************/
 /*
@@ -237,8 +236,7 @@ int main(void)
 	 */
 	Status = ps7_init();
 	if (Status != FSBL_PS7_INIT_SUCCESS) {
-		fsbl_printf(DEBUG_GENERAL,"PS7_INIT_FAIL : %s\r\n",
-						getPS7MessageInfo(Status));
+		fsbl_printf(DEBUG_GENERAL,"PS7_INIT_FAIL : %s\r\n", getPS7MessageInfo(Status));
 		OutputStatus(PS7_INIT_FAIL);
 		/*
 		 * Calling FsblHookFallback instead of Fallback
@@ -258,10 +256,10 @@ int main(void)
 	 * done in the ps7_init function is not accounted in the FSBL
 	 *
 	 */
-#ifdef FSBL_PERF
-	XTime tCur = 0;
-	FsblGetGlobalTime(&tCur);
-#endif
+    #ifdef FSBL_PERF
+        XTime tCur = 0;
+        FsblGetGlobalTime(&tCur);
+    #endif
 
 	/*
 	 * Flush the Caches
@@ -282,113 +280,92 @@ int main(void)
 	 * Print the FSBL Banner
 	 */
 	fsbl_printf(DEBUG_GENERAL,"\n\rXilinx First Stage Boot Loader \n\r");
-	fsbl_printf(DEBUG_GENERAL,"Release %d.%d	%s-%s\r\n",
-			SDK_RELEASE_YEAR, SDK_RELEASE_QUARTER,
-			__DATE__,__TIME__);
-
-#if defined(XPAR_PS7_DDR_0_S_AXI_BASEADDR) || defined(XPAR_PS7_DDR_0_BASEADDRESS)
-
-    /*
-     * DDR Read/write test 
-     */
-	Status = DDRInitCheck();
-	if (Status == XST_FAILURE) {
-		fsbl_printf(DEBUG_GENERAL,"DDR_INIT_FAIL \r\n");
-		/* Error Handling here */
-		OutputStatus(DDR_INIT_FAIL);
-		/*
-		 * Calling FsblHookFallback instead of Fallback
-		 * since, devcfg driver is not yet initialized
-		 */
-		FsblHookFallback();
-	}
-
+	fsbl_printf(DEBUG_GENERAL,"Release %d.%d	%s-%s\r\n", SDK_RELEASE_YEAR, SDK_RELEASE_QUARTER, __DATE__,__TIME__);
 
 	/*
-	 * PCAP initialization
-	 */
+	* PCAP initialization
+	*/
 	Status = InitPcap();
 	if (Status == XST_FAILURE) {
 		fsbl_printf(DEBUG_GENERAL,"PCAP_INIT_FAIL \n\r");
 		OutputStatus(PCAP_INIT_FAIL);
 		/*
-		 * Calling FsblHookFallback instead of Fallback
-		 * since, devcfg driver is not yet initialized
-		 */
+		* Calling FsblHookFallback instead of Fallback
+		* since, devcfg driver is not yet initialized
+		*/
 		FsblHookFallback();
 	}
 
 	fsbl_printf(DEBUG_INFO,"Devcfg driver initialized \r\n");
 
 	/*
-	 * Get the Silicon Version
-	 */
+	* Get the Silicon Version
+	*/
 	GetSiliconVersion();
 
-#ifdef XPAR_XWDTPS_0_BASEADDR
-	/*
-	 * Check if WDT Reset has occurred or not
-	 */
-	CheckWDTReset();
+	#ifdef XPAR_XWDTPS_0_BASEADDR
+		/*
+		* Check if WDT Reset has occurred or not
+		*/
+		CheckWDTReset();
+
+		/*
+		* Initialize the Watchdog Timer so that it is ready to use
+		*/
+		Status = InitWatchDog();
+		if (Status == XST_FAILURE) {
+			fsbl_printf(DEBUG_GENERAL,"WATCHDOG_INIT_FAIL \n\r");
+			OutputStatus(WDT_INIT_FAIL);
+			FsblFallback();
+		}
+		fsbl_printf(DEBUG_INFO,"Watchdog driver initialized \r\n");
+	#endif
 
 	/*
-	 * Initialize the Watchdog Timer so that it is ready to use
-	 */
-	Status = InitWatchDog();
-	if (Status == XST_FAILURE) {
-		fsbl_printf(DEBUG_GENERAL,"WATCHDOG_INIT_FAIL \n\r");
-		OutputStatus(WDT_INIT_FAIL);
-		FsblFallback();
-	}
-	fsbl_printf(DEBUG_INFO,"Watchdog driver initialized \r\n");
-#endif
-
-	/*
-	 * Get PCAP controller settings
-	 */
+	* Get PCAP controller settings
+	*/
 	PcapCtrlRegVal = XDcfg_GetControlRegister(DcfgInstPtr);
 
 	/*
-	 * Check for AES source key
-	 */
+	* Check for AES source key
+	*/
 	if (PcapCtrlRegVal & XDCFG_CTRL_PCFG_AES_FUSE_MASK) {
 		/*
-		 * For E-Fuse AES encryption Watch dog Timer disabled and
-		 * User not allowed to do system reset
-		 */
-#ifdef	XPAR_XWDTPS_0_BASEADDR
-		fsbl_printf(DEBUG_INFO,"Watchdog Timer Disabled\r\n");
-		XWdtPs_Stop(&Watchdog);
-#endif
-		fsbl_printf(DEBUG_INFO,"User not allowed to do "
-								"any system resets\r\n");
+		* For E-Fuse AES encryption Watch dog Timer disabled and
+		* User not allowed to do system reset
+		*/
+		#ifdef	XPAR_XWDTPS_0_BASEADDR
+			fsbl_printf(DEBUG_INFO,"Watchdog Timer Disabled\r\n");
+			XWdtPs_Stop(&Watchdog);
+		#endif
+		fsbl_printf(DEBUG_INFO,"User not allowed to do any system resets\r\n");
 	}
 
 	/*
-	 * Store FSBL run state in Reboot Status Register
-	 */
+	* Store FSBL run state in Reboot Status Register
+	*/
 	MarkFSBLIn();
 
 	/*
-	 * Read bootmode register
-	 */
+	* Read bootmode register
+	*/
 	BootModeRegister = Xil_In32(BOOT_MODE_REG);
 	BootModeRegister &= BOOT_MODES_MASK;
 
 	/*
-	 * QSPI BOOT MODE
-	 */
-#if defined(XPAR_PS7_QSPI_LINEAR_0_S_AXI_BASEADDR) || defined(XPAR_PS7_QSPI_LINEAR_0_BASEADDR)
+	* QSPI BOOT MODE
+	*/
+	#if defined(XPAR_PS7_QSPI_LINEAR_0_S_AXI_BASEADDR) || defined(XPAR_PS7_QSPI_LINEAR_0_BASEADDR)
 
-#ifdef MMC_SUPPORT
+	#ifdef MMC_SUPPORT
 	/*
-	 * To support MMC boot
-	 * QSPI boot mode detection ignored
-	 */
+	* To support MMC boot
+	* QSPI boot mode detection ignored
+	*/
 	if (BootModeRegister == QSPI_MODE) {
 		BootModeRegister = MMC_MODE;
 	}
-#endif
+	#endif
 
 	if (BootModeRegister == QSPI_MODE) {
 		fsbl_printf(DEBUG_GENERAL,"Boot mode is QSPI\n\r");
@@ -396,91 +373,11 @@ int main(void)
 		MoveImage = QspiAccess;
 		fsbl_printf(DEBUG_INFO,"QSPI Init Done \r\n");
 	} else
-#endif
 
+	#endif
 	/*
-	 * NAND BOOT MODE
-	 */
-#if defined(XPAR_PS7_NAND_0_BASEADDR) || defined(XPAR_XNANDPS_0_FLASHBASE)
-	if (BootModeRegister == NAND_FLASH_MODE) {
-		/*
-	 	* Boot ROM always initialize the nand at lower speed
-	 	* This is the chance to put it to an optimum speed for your nand
-	 	* device
-	 	*/
-		fsbl_printf(DEBUG_GENERAL,"Boot mode is NAND\n");
-
-		Status = InitNand();
-		if (Status != XST_SUCCESS) {
-			fsbl_printf(DEBUG_GENERAL,"NAND_INIT_FAIL \r\n");
-			/*
-			 * Error Handling here
-			 */
-			OutputStatus(NAND_INIT_FAIL);
-			FsblFallback();
-		}
-		MoveImage = NandAccess;
-		fsbl_printf(DEBUG_INFO,"NAND Init Done \r\n");
-	} else
-#endif
-
-	/*
-	 * NOR BOOT MODE
-	 */
-	if (BootModeRegister == NOR_FLASH_MODE) {
-		fsbl_printf(DEBUG_GENERAL,"Boot mode is NOR\n\r");
-		/*
-		 * Boot ROM always initialize the nor at lower speed
-		 * This is the chance to put it to an optimum speed for your nor
-		 * device
-		 */
-		InitNor();
-		fsbl_printf(DEBUG_INFO,"NOR Init Done \r\n");
-		MoveImage = NorAccess;
-	} else
-
-	/*
-	 * SD BOOT MODE
-	 */
-#if defined(XPAR_PS7_SD_0_S_AXI_BASEADDR) || defined(XPAR_XSDPS_0_BASEADDR)
-
-	if (BootModeRegister == SD_MODE) {
-		fsbl_printf(DEBUG_GENERAL,"Boot mode is SD\r\n");
-
-		/*
-		 * SD initialization returns file open error or success
-		 */
-		Status = InitSD("BOOT.BIN");
-		if (Status != XST_SUCCESS) {
-			fsbl_printf(DEBUG_GENERAL,"SD_INIT_FAIL\r\n");
-			OutputStatus(SD_INIT_FAIL);
-			FsblFallback();
-		}
-		MoveImage = SDAccess;
-		fsbl_printf(DEBUG_INFO,"SD Init Done \r\n");
-	} else
-
-	if (BootModeRegister == MMC_MODE) {
-		fsbl_printf(DEBUG_GENERAL,"Booting Device is MMC\r\n");
-
-		/*
-		 * MMC initialization returns file open error or success
-		 */
-		Status = InitSD("BOOT.BIN");
-		if (Status != XST_SUCCESS) {
-			fsbl_printf(DEBUG_GENERAL,"MMC_INIT_FAIL\r\n");
-			OutputStatus(SD_INIT_FAIL);
-			FsblFallback();
-		}
-		MoveImage = SDAccess;
-		fsbl_printf(DEBUG_INFO,"MMC Init Done \r\n");
-	} else
-
-#endif
-
-	/*
-	 * JTAG  BOOT MODE
-	 */
+	* JTAG  BOOT MODE
+	*/
 	if (BootModeRegister == JTAG_MODE) {
 		fsbl_printf(DEBUG_GENERAL,"Boot mode is JTAG\r\n");
 
@@ -488,28 +385,28 @@ int main(void)
 		/** If bitstream was loaded in jtag boot mode prior to running FSBL */
 		if(RegVal & XDCFG_IXR_PCFG_DONE_MASK)
 		{
-#ifdef PS7_POST_CONFIG
-		ps7_post_config();
-		/*
-		 * Unlock SLCR for SLCR register write
-		 */
-		SlcrUnlock();
-#endif
+		#ifdef PS7_POST_CONFIG
+			ps7_post_config();
+			/*
+			* Unlock SLCR for SLCR register write
+			*/
+			SlcrUnlock();
+		#endif
 		}
 		/*
-		 * Stop the Watchdog before JTAG handoff
-		 */
-#ifdef	XPAR_XWDTPS_0_BASEADDR
-		XWdtPs_Stop(&Watchdog);
-#endif
+		* Stop the Watchdog before JTAG handoff
+		*/
+		#ifdef	XPAR_XWDTPS_0_BASEADDR
+			XWdtPs_Stop(&Watchdog);
+		#endif
 		/*
-		 * Clear our mark in reboot status register
-		 */
+		* Clear our mark in reboot status register
+		*/
 		ClearFSBLIn();
 
 		/*
-		 * SLCR lock
-		 */
+		* SLCR lock
+		*/
 		SlcrLock();
 
 		FsblHandoffJtagExit();
@@ -517,72 +414,57 @@ int main(void)
 		fsbl_printf(DEBUG_GENERAL,"ILLEGAL_BOOT_MODE \r\n");
 		OutputStatus(ILLEGAL_BOOT_MODE);
 		/*
-		 * fallback starts, no return
-		 */
+		* fallback starts, no return
+		*/
 		FsblFallback();
 	}
 
 	fsbl_printf(DEBUG_INFO,"Flash Base Address: 0x%08x\r\n", FlashReadBaseAddress);
 
 	/*
-	 * Check for valid flash address
-	 */
-	if ((FlashReadBaseAddress != XPS_QSPI_LINEAR_BASEADDR) &&
-			(FlashReadBaseAddress != XPS_NAND_BASEADDR) &&
-			(FlashReadBaseAddress != XPS_NOR_BASEADDR) &&
-			(FlashReadBaseAddress != XPS_SDIO0_BASEADDR)) {
+	* Check for valid flash address
+	*/
+	if (FlashReadBaseAddress != XPS_QSPI_LINEAR_BASEADDR) {
 		fsbl_printf(DEBUG_GENERAL,"INVALID_FLASH_ADDRESS \r\n");
 		OutputStatus(INVALID_FLASH_ADDRESS);
 		FsblFallback();
 	}
 
-	/*
-	 * NOR and QSPI (parallel) are linear boot devices
-	 */
-	if ((FlashReadBaseAddress == XPS_NOR_BASEADDR)) {
-		fsbl_printf(DEBUG_INFO, "Linear Boot Device\r\n");
-		LinearBootDeviceFlag = 1;
-	}
-
-#ifdef	XPAR_XWDTPS_0_BASEADDR
-	/*
-	 * Prevent WDT reset
-	 */
-	XWdtPs_RestartWdt(&Watchdog);
-#endif
+	#ifdef	XPAR_XWDTPS_0_BASEADDR
+		/*
+		* Prevent WDT reset
+		*/
+		XWdtPs_RestartWdt(&Watchdog);
+	#endif
 
 	/*
-	 * This used only in case of E-Fuse encryption
-	 * For image search
-	 */
+	* This used only in case of E-Fuse encryption
+	* For image search
+	*/
 	SystemInitFlag = 1;
 
 	/*
-	 * Load boot image
-	 */
-	HandoffAddress = LoadBootImage();
+	* Load boot image using streaming mode (no DDR — chunks bitstream
+	* directly to PCAP, loads PS application into BRAM via QspiAccess)
+	*/
+	HandoffAddress = StreamBootImage();
 
 	fsbl_printf(DEBUG_INFO,"Handoff Address: 0x%08x\r\n",HandoffAddress);
 
 	/*
-	 * For Performance measurement
-	 */
-#ifdef FSBL_PERF
-	XTime tEnd = 0;
-	fsbl_printf(DEBUG_GENERAL,"Total Execution time is ");
-	FsblMeasurePerfTime(tCur,tEnd);
-#endif
+	* For Performance measurement
+	*/
+	#ifdef FSBL_PERF
+		XTime tEnd = 0;
+		fsbl_printf(DEBUG_GENERAL,"Total Execution time is ");
+		FsblMeasurePerfTime(tCur,tEnd);
+	#endif
 
 	/*
-	 * FSBL handoff to valid handoff address or
-	 * exit in JTAG
-	 */
+	* FSBL handoff to valid handoff address or
+	* exit in JTAG
+	*/
 	FsblHandoff(HandoffAddress);
-
-#else
-	OutputStatus(NO_DDR);
-	FsblFallback();
-#endif
 
 	return Status;
 }
@@ -1433,14 +1315,6 @@ u32 NextValidImageCheck(void)
 	}
 #endif
 
-	if (FlashReadBaseAddress == XPS_NAND_BASEADDR) {
-		BootDevMaxSize  = NAND_FLASH_SIZE;
-	}
-
-	if (FlashReadBaseAddress == XPS_NOR_BASEADDR) {
-		BootDevMaxSize  = NOR_FLASH_SIZE;
-	}
-
 	/*
 	 * Read the multiboot register
 	 */
@@ -1493,43 +1367,4 @@ u32 NextValidImageCheck(void)
 	}
 
 	return XST_FAILURE;
-}
-
-/******************************************************************************/
-/**
-*
-* This function Checks for the ddr initialization completion
-*
-* @param	None.
-*
-* @return
-*		- XST_SUCCESS if the initialization is successful
-*		- XST_FAILURE if the  initialization is NOT successful
-*
-* @note		None.
-*
-****************************************************************************/
-u32 DDRInitCheck(void)
-{
-	u32 ReadVal;
-
-	/*
-	 * Write and Read from the DDR location for sanity checks
-	 */
-	Xil_Out32(DDR_START_ADDR, DDR_TEST_PATTERN);
-	ReadVal = Xil_In32(DDR_START_ADDR);
-	if (ReadVal != DDR_TEST_PATTERN) {
-		return XST_FAILURE;
-	}
-
-	/*
-	 * Write and Read from the DDR location for sanity checks
-	 */
-	Xil_Out32(DDR_START_ADDR + DDR_TEST_OFFSET, DDR_TEST_PATTERN);
-	ReadVal = Xil_In32(DDR_START_ADDR + DDR_TEST_OFFSET);
-	if (ReadVal != DDR_TEST_PATTERN) {
-		return XST_FAILURE;
-	}
-
-	return XST_SUCCESS;
 }

@@ -79,6 +79,9 @@ u32 PcapLoadPartition(u32 *SourceData, u32 *DestinationData, u32 SourceLength,
 		 	u32 DestinationLength, u32 Flags);
 u32 PcapDataTransfer(u32 *SourceData, u32 *DestinationData, u32 SourceLength,
  			u32 DestinationLength, u32 Flags);
+u32 PcapBitstreamChunk(u32 *DataPtr, u32 WordLen, u32 IsLastChunk);
+u32 PcapBitstreamChunkStart(u32 *DataPtr, u32 WordLen, u32 IsLastChunk);
+u32 PcapBitstreamChunkWait(u32 IsLastChunk, u32 ChunkCount);
 /************************** Variable Definitions *****************************/
 #ifdef __cplusplus
 }
